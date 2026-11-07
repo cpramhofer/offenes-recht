@@ -1,0 +1,13 @@
+[Unit]
+Description=Offenes Recht – Betriebs-Socket für ionos-ops
+
+[Socket]
+ListenStream=/run/or-ops.sock
+SocketUser=root
+SocketGroup=ionosops
+SocketMode=0660
+Accept=yes
+MaxConnections=4
+
+[Install]
+WantedBy=sockets.target

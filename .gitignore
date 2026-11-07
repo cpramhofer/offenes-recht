@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+data/
+*.db
+*.db-*
+dist/
+static/index.html
+law.js
+ops/umstellung-socket.sh
+ops/update-einrichten.sh

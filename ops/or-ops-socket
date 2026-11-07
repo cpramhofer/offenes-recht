@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+# Liest genau eine Zeile vom Socket (Felder durch Tabulator getrennt) und reicht sie als
+# Argumente an or-ops weiter. Kein eval, keine Shell-Auswertung; or-ops prüft jedes Argument.
+set -uo pipefail
+IFS= read -r -t 10 -n 512 line || { echo '{"ok": false, "error": "Keine Anfrage erhalten."}'; exit 0; }
+IFS=$'\t' read -r -a args <<< "$line"
+(( ${#args[@]} >= 1 && ${#args[@]} <= 3 )) || { echo '{"ok": false, "error": "Ungültige Anfrage."}'; exit 0; }
+SUDO_USER=ionos-ops exec /usr/local/sbin/or-ops "${args[@]}" 2>&1

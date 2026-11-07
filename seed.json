@@ -1,0 +1,245 @@
+{
+ "BOT1": {
+  "name": "Verweis-Check",
+  "auftraggeber": "Institut für Legistik (Beispiel, fiktiv)",
+  "auftrag": "Prüft Verweise, Fundstellen und Ressortbezeichnungen der GewO auf Aktualität. Keine inhaltlichen Wertungen.",
+  "modell": "Claude (Anthropic)"
+ },
+ "SEED": [
+  {
+   "id": "c1",
+   "key": "10007517/p359b/abs4",
+   "type": "prop",
+   "author": "Planungsbüro Gruber & Partner",
+   "kind": "org",
+   "verified": "Organisation, Firmenbuch",
+   "ex": true,
+   "text": "Der Bescheid gemäß Abs. 3 gilt als Genehmigungsbescheid für die Anlage. Die Behörde hat binnen zwei Monaten nach Einlangen des vollständigen Genehmigungsansuchens und dessen Beilagen (§ 353) zu entscheiden. Entscheidet die Behörde nicht fristgerecht, gilt die Anlage als genehmigt; die Behörde hat dies auf Antrag schriftlich zu bestätigen. Die Verwaltungsgerichte der Länder haben spätestens zwei Monate nach Einlangen der Beschwerde gegen den Bescheid zu entscheiden. IPPC-Anlagen und Betriebe im Sinne des § 84b Z 1 sind nicht dem vereinfachten Genehmigungsverfahren zu unterziehen.",
+   "why": "Die Zwei-Monats-Frist wird in der Praxis oft überschritten, ohne Folge für die Behörde. Eine Genehmigungsfiktion gibt kleinen Betrieben Planungssicherheit. Das Abstellen auf das vollständige Ansuchen verhindert, dass die Fiktion bei lückenhaften Unterlagen greift.",
+   "r": {
+    "g1": [
+     41,
+     6,
+     3
+    ],
+    "g2": [
+     22,
+     9,
+     12
+    ]
+   },
+   "pw": {
+    "wins": 58,
+    "n": 84
+   },
+   "base": "Der Bescheid gemäß Abs. 3 gilt als Genehmigungsbescheid für die Anlage. Die Behörde hat binnen zwei Monaten nach Einlangen des Genehmigungsansuchens und dessen Beilagen (§ 353) zu entscheiden. Die Verwaltungsgerichte der Länder haben spätestens zwei Monate nach Einlangen der Beschwerde gegen den Bescheid zu entscheiden. IPPC-Anlagen und Betriebe im Sinne des § 84b Z 1 sind nicht dem vereinfachten Genehmigungsverfahren zu unterziehen."
+  },
+  {
+   "id": "c2",
+   "key": "10007517/p359b/abs4",
+   "type": "prop",
+   "author": "M. Leitner",
+   "kind": "citizen",
+   "verified": "ID Austria",
+   "ex": true,
+   "text": "Der Bescheid gemäß Abs. 3 gilt als Genehmigungsbescheid für die Anlage. Die Behörde hat binnen sechs Wochen nach Einlangen des Genehmigungsansuchens und dessen Beilagen (§ 353) zu entscheiden. Die Verwaltungsgerichte der Länder haben spätestens zwei Monate nach Einlangen der Beschwerde gegen den Bescheid zu entscheiden. IPPC-Anlagen und Betriebe im Sinne des § 84b Z 1 sind nicht dem vereinfachten Genehmigungsverfahren zu unterziehen.",
+   "why": "Kürzere Frist statt Fiktion. Eine Fiktion verlagert das Risiko auf Nachbarn, eine kürzere Frist erhöht nur den Druck auf die Behörde.",
+   "r": {
+    "g1": [
+     12,
+     8,
+     9
+    ],
+    "g2": [
+     10,
+     6,
+     8
+    ]
+   },
+   "pw": {
+    "wins": 26,
+    "n": 84
+   },
+   "base": "Der Bescheid gemäß Abs. 3 gilt als Genehmigungsbescheid für die Anlage. Die Behörde hat binnen zwei Monaten nach Einlangen des Genehmigungsansuchens und dessen Beilagen (§ 353) zu entscheiden. Die Verwaltungsgerichte der Länder haben spätestens zwei Monate nach Einlangen der Beschwerde gegen den Bescheid zu entscheiden. IPPC-Anlagen und Betriebe im Sinne des § 84b Z 1 sind nicht dem vereinfachten Genehmigungsverfahren zu unterziehen."
+  },
+  {
+   "id": "c3",
+   "key": "10007517/p359b/abs4",
+   "type": "com",
+   "author": "Anrainerin_Mödling",
+   "kind": "citizen",
+   "verified": "ID Austria, Pseudonym",
+   "ex": true,
+   "text": "Eine Genehmigungsfiktion halte ich nur für vertretbar, wenn die Nachbarn nachweislich nach Abs. 2 verständigt wurden. Sonst entsteht eine Genehmigung, von der niemand weiß.",
+   "r": {
+    "g1": [
+     8,
+     4,
+     2
+    ],
+    "g2": [
+     15,
+     3,
+     1
+    ]
+   },
+   "base": "Der Bescheid gemäß Abs. 3 gilt als Genehmigungsbescheid für die Anlage. Die Behörde hat binnen zwei Monaten nach Einlangen des Genehmigungsansuchens und dessen Beilagen (§ 353) zu entscheiden. Die Verwaltungsgerichte der Länder haben spätestens zwei Monate nach Einlangen der Beschwerde gegen den Bescheid zu entscheiden. IPPC-Anlagen und Betriebe im Sinne des § 84b Z 1 sind nicht dem vereinfachten Genehmigungsverfahren zu unterziehen."
+  },
+  {
+   "id": "c4",
+   "key": "10007517/p359b/abs5",
+   "type": "prop",
+   "author": "Verweis-Check",
+   "kind": "bot",
+   "bot": {
+    "name": "Verweis-Check",
+    "auftraggeber": "Institut für Legistik (Beispiel, fiktiv)",
+    "auftrag": "Prüft Verweise, Fundstellen und Ressortbezeichnungen der GewO auf Aktualität. Keine inhaltlichen Wertungen.",
+    "modell": "Claude (Anthropic)"
+   },
+   "ex": true,
+   "text": "Die für Angelegenheiten des Gewerbes zuständige Bundesministerin oder der zuständige Bundesminister hat durch Verordnung Arten von Betriebsanlagen zu bezeichnen, die dem vereinfachten Verfahren gemäß Abs. 2 bis 4 zu unterziehen sind, weil auf Grund der vorgesehenen Ausführung der Anlagen (insbesondere der Beschaffenheit und Wirkungsweise der Maschinen, Geräte und Ausstattungen der Anlage, der elektrischen Anschlussleistung der eingesetzten Maschinen und Geräte, der Betriebsweise, der räumlichen Ausdehnung der Anlage, der Art und Menge der in der Anlage gelagerten, geleiteten, umgeschlagenen, verwendeten oder hergestellten Stoffe) nach Art, Ausmaß und Dauer der Emissionen dieser Anlagen zu erwarten ist, dass die gemäß § 74 Abs. 2 wahrzunehmenden Interessen hinreichend geschützt und Belastungen der Umwelt (§ 69a) vermieden werden.",
+   "why": "Die Ressortbezeichnung entspricht nicht mehr der geltenden Ressortverteilung. Eine funktionale Bezeichnung macht künftige Anpassungen bei Ressortumbildungen unnötig. Dieselbe Bezeichnung findet sich in Abs. 6.",
+   "r": {
+    "g1": [
+     30,
+     2,
+     1
+    ],
+    "g2": [
+     28,
+     3,
+     0
+    ]
+   },
+   "base": "Der Bundesminister für Wissenschaft, Forschung und Wirtschaft hat durch Verordnung Arten von Betriebsanlagen zu bezeichnen, die dem vereinfachten Verfahren gemäß Abs. 2 bis 4 zu unterziehen sind, weil auf Grund der vorgesehenen Ausführung der Anlagen (insbesondere der Beschaffenheit und Wirkungsweise der Maschinen, Geräte und Ausstattungen der Anlage, der elektrischen Anschlussleistung der eingesetzten Maschinen und Geräte, der Betriebsweise, der räumlichen Ausdehnung der Anlage, der Art und Menge der in der Anlage gelagerten, geleiteten, umgeschlagenen, verwendeten oder hergestellten Stoffe) nach Art, Ausmaß und Dauer der Emissionen dieser Anlagen zu erwarten ist, dass die gemäß § 74 Abs. 2 wahrzunehmenden Interessen hinreichend geschützt und Belastungen der Umwelt (§ 69a) vermieden werden."
+  },
+  {
+   "id": "c5",
+   "key": "10007517/p81/abs2/z8",
+   "type": "com",
+   "author": "Verweis-Check",
+   "kind": "bot",
+   "bot": {
+    "name": "Verweis-Check",
+    "auftraggeber": "Institut für Legistik (Beispiel, fiktiv)",
+    "auftrag": "Prüft Verweise, Fundstellen und Ressortbezeichnungen der GewO auf Aktualität. Keine inhaltlichen Wertungen.",
+    "modell": "Claude (Anthropic)"
+   },
+   "ex": true,
+   "text": "Verweis prüfen: Das Luftreinhaltegesetz für Kesselanlagen, BGBl. Nr. 380/1988, ist nach unserem Abgleich durch das Emissionsschutzgesetz für Kesselanlagen abgelöst. Z 8 könnte damit totes Recht sein oder einen neuen Verweis brauchen.",
+   "r": {
+    "g1": [
+     14,
+     2,
+     0
+    ],
+    "g2": [
+     11,
+     1,
+     1
+    ]
+   },
+   "base": "Sanierung gemäß § 12 des Luftreinhaltegesetzes für Kesselanlagen, BGBl. Nr. 380/1988,"
+  },
+  {
+   "id": "c6",
+   "key": "10007517/p74/abs1",
+   "type": "com",
+   "author": "Lukas Hofer, Gastronom",
+   "kind": "citizen",
+   "verified": "ID Austria",
+   "ex": true,
+   "w": {
+    "quote": "nicht bloß vorübergehend",
+    "from": 18,
+    "to": 20
+   },
+   "text": "Unbestimmter Begriff. Bei Pop-up-Lokalen und Saisonständen weiß niemand vorab, ab wann eine Anlage nicht mehr bloß vorübergehend ist. Eine Zeitgrenze, etwa sechs Wochen wie in § 81 Abs. 2 Z 11, würde helfen.",
+   "r": {
+    "g1": [
+     9,
+     3,
+     1
+    ],
+    "g2": [
+     6,
+     2,
+     1
+    ]
+   },
+   "base": "Unter einer gewerblichen Betriebsanlage ist jede örtlich gebundene Einrichtung zu verstehen, die der Entfaltung einer gewerblichen Tätigkeit nicht bloß vorübergehend zu dienen bestimmt ist."
+  },
+  {
+   "id": "c7",
+   "key": "10007517/p81/abs3",
+   "type": "prop",
+   "author": "Wirtschaftskammer-Fachgruppe (Beispiel)",
+   "kind": "org",
+   "verified": "Organisation, ZVR",
+   "ex": true,
+   "text": "Änderungen gemäß Abs. 2 Z 7 sind der zur Genehmigung der Anlage zuständigen Behörde vorher anzuzeigen. Untersagt die Behörde die Änderung nicht binnen vier Wochen nach Einlangen der vollständigen Anzeige, darf sie durchgeführt werden.",
+   "why": "Heute bleibt nach einer Anzeige offen, ob die Behörde sie akzeptiert. Eine Untersagungsfrist schafft Rechtssicherheit, ohne die Prüfung abzuschaffen.",
+   "r": {
+    "g1": [
+     18,
+     4,
+     2
+    ],
+    "g2": [
+     9,
+     5,
+     7
+    ]
+   },
+   "base": "Änderungen gemäß Abs. 2 Z 7 sind der zur Genehmigung der Anlage zuständigen Behörde vorher anzuzeigen."
+  },
+  {
+   "id": "c8",
+   "key": "10007517/p359b/abs1/z2",
+   "type": "prop",
+   "author": "Tischlerei Wallner",
+   "kind": "org",
+   "verified": "Organisation, Firmenbuch",
+   "ex": true,
+   "text": "das Ausmaß der der Betriebsanlage zur Verfügung stehenden Räumlichkeiten und sonstigen Betriebsflächen insgesamt nicht mehr als 1 500 m² beträgt und die elektrische Anschlussleistung der zur Verwendung gelangenden Maschinen und Geräte 500 kW nicht übersteigt oder",
+   "why": "Die Schwellen stammen aus einer Zeit vor Photovoltaik und Wärmepumpen. Moderne Maschinen erreichen 300 kW schneller, ohne mehr Emissionen zu verursachen.",
+   "r": {
+    "g1": [
+     33,
+     4,
+     3
+    ],
+    "g2": [
+     6,
+     5,
+     24
+    ]
+   },
+   "base": "das Ausmaß der der Betriebsanlage zur Verfügung stehenden Räumlichkeiten und sonstigen Betriebsflächen insgesamt nicht mehr als 800 m² beträgt und die elektrische Anschlussleistung der zur Verwendung gelangenden Maschinen und Geräte 300 kW nicht übersteigt oder"
+  },
+  {
+   "id": "c9",
+   "key": "10007517/p74/abs2/z2",
+   "type": "com",
+   "author": "P. Eder",
+   "kind": "citizen",
+   "verified": "ID Austria",
+   "ex": true,
+   "text": "Als Anrainer eines Kfz-Betriebs: Lärm wird fast nur tagsüber gemessen. Die Belästigung passiert aber am frühen Morgen beim Anliefern.",
+   "r": {
+    "g1": [
+     3,
+     1,
+     0
+    ],
+    "g2": [
+     5,
+     1,
+     0
+    ]
+   },
+   "base": "die Nachbarn durch Geruch, Lärm, Rauch, Staub, Erschütterung oder in anderer Weise zu belästigen,"
+  }
+ ]
+}

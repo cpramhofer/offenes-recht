@@ -1,0 +1,10 @@
+[Unit]
+Description=Offenes Recht – Betriebsaktion (%i)
+
+[Service]
+ExecStart=/usr/local/sbin/or-ops-socket
+StandardInput=socket
+StandardOutput=socket
+StandardError=journal
+TimeoutStartSec=0
+RuntimeMaxSec=200
