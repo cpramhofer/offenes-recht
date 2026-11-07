@@ -8,3 +8,4 @@ static/index.html
 law.js
 ops/umstellung-socket.sh
 ops/update-einrichten.sh
+ops/update-quelle.sh
