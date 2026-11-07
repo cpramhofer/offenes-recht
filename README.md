@@ -46,7 +46,7 @@ Ein Release-Paket entsteht mit `bash release.sh`; es enthält `server.py`, `seed
 
 Erstinstallation am Server (als root): Paket entpacken und `bash offenes-recht/install.sh` ausführen. Das Skript fragt vor jeder Änderung nach, richtet den Dienst `offenes-recht` (Port 8790, nur lokal) ein und stellt den Webserver auf Reverse-Proxy um.
 
-Für den Betrieb über einen MCP-Werkzeugserver liegen in `ops/` ein Hilfsskript mit fest verdrahteten Aktionen (status, logs, restart, deploy, update, backup, restore, stats) und die zugehörigen Werkzeuge. `update` lädt ein Release-Paket von GitHub, prüft die SHA-256-Prüfsumme, sichert die Datenbank, installiert und kehrt automatisch zur alten Version zurück, wenn die neue nicht antwortet.
+Für den Betrieb über einen MCP-Werkzeugserver liegen in `ops/` ein Hilfsskript mit fest verdrahteten Aktionen (status, logs, restart, deploy, update, backup, restore, stats) und die zugehörigen Werkzeuge. `update` lädt ein Paket aus den GitHub-Releases oder dem Zweig `pakete`, prüft die SHA-256-Prüfsumme, sichert die Datenbank, installiert und kehrt automatisch zur alten Version zurück, wenn die neue nicht antwortet.
 
 ## Lizenz
 

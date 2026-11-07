@@ -101,13 +101,17 @@ PY
     [[ "$tag" =~ ^v([0-9]{1,3}\.[0-9]{1,3}(\.[0-9]{1,3})?)$ ]] || fail "tag: Form v1.2 oder v1.2.3 erwartet"
     ver="${BASH_REMATCH[1]}"
     [[ "$sha" =~ ^[0-9a-f]{64}$ ]] || fail "sha256: 64 Hex-Zeichen erwartet"
-    url="https://github.com/$REPO/releases/download/$tag/offenes-recht-$ver.tgz"
-    part="$INCOMING.dl"; rm -f "$part"
-    curl -fsSL --proto '=https' --max-filesize 5242880 -m 60 -o "$part" "$url" 2>/dev/null || { rm -f "$part"; fail "Download fehlgeschlagen: $url"; }
+    # Quelle 1: GitHub-Release; Quelle 2: Zweig „pakete“ im selben Repository. Die Prüfsumme entscheidet.
+    part="$INCOMING.dl"; rm -f "$part"; url=""
+    for u in "https://github.com/$REPO/releases/download/$tag/offenes-recht-$ver.tgz" \
+             "https://raw.githubusercontent.com/$REPO/pakete/offenes-recht-$ver.tgz"; do
+      curl -fsSL --proto '=https' --max-filesize 5242880 -m 60 -o "$part" "$u" 2>/dev/null && { url="$u"; break; }
+    done
+    [[ -n "$url" ]] || { rm -f "$part"; fail "Paket $tag weder als Release noch im Zweig pakete gefunden."; }
     actual="$(sha256sum "$part" | awk '{print $1}')"
     [[ "$actual" == "$sha" ]] || { rm -f "$part"; fail "Prüfsumme stimmt nicht (erwartet $sha, erhalten $actual)."; }
     mv -f "$part" "$INCOMING"
-    audit "update $tag geladen sha=$sha"
+    audit "update $tag geladen von $url sha=$sha"
     exec "$0" deploy "$sha"
     ;;
 
