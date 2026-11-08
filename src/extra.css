@@ -239,3 +239,10 @@ figure.chart g.bar:hover path{fill:var(--ink)}
 .zahlen .tops td:first-child{width:28px;color:var(--muted)}
 .zahlen .list{display:flex;flex-direction:column;gap:10px}
 @media (max-width:760px){.zahlen .hero{grid-template-columns:repeat(2,minmax(0,1fr))}.zahlen .tops{grid-template-columns:1fr}}
+/* 1.5: Begutachtung, Folgen */
+.followrow{display:flex;gap:10px;align-items:center;margin:0 0 8px}
+button.follow.on{color:var(--ink);font-weight:600}
+.btn.follow.on{border-color:var(--ink)}
+.drcard .paddr{font-weight:600}
+.pcard.drcard .paddr,.pcard.pkcard .paddr{font-family:inherit;font-size:15px;line-height:1.35;color:var(--ink);text-decoration:none}
+.pcard.drcard .paddr:hover,.pcard.pkcard .paddr:hover{text-decoration:underline}

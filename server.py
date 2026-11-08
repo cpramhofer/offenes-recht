@@ -55,6 +55,10 @@ CREATE TABLE IF NOT EXISTS packages(id INTEGER PRIMARY KEY, title TEXT NOT NULL,
   created INTEGER NOT NULL, updated INTEGER NOT NULL, removed_at INTEGER, removed_by INTEGER, removed_reason TEXT, removed_note TEXT);
 CREATE TABLE IF NOT EXISTS package_items(package_id INTEGER NOT NULL, cid INTEGER NOT NULL, pos INTEGER NOT NULL, PRIMARY KEY(package_id, cid));
 CREATE TABLE IF NOT EXISTS package_ratings(user_id INTEGER, package_id INTEGER, v TEXT, created INTEGER, PRIMARY KEY(user_id, package_id));
+CREATE TABLE IF NOT EXISTS drafts(gnr TEXT PRIMARY KEY, gp TEXT, inr INTEGER, title TEXT, ressort TEXT, ministry TEXT, frist TEXT,
+  einlangen TEXT, url TEXT, active INTEGER DEFAULT 0, statements INTEGER DEFAULT 0, synced INTEGER);
+CREATE TABLE IF NOT EXISTS follows(user_id INTEGER NOT NULL, kind TEXT NOT NULL, ref TEXT NOT NULL, created INTEGER NOT NULL,
+  seen_count INTEGER, seen_status TEXT, PRIMARY KEY(user_id, kind, ref));
 CREATE TABLE IF NOT EXISTS resets(token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL, expires INTEGER NOT NULL, used INTEGER DEFAULT 0);
 """
 
@@ -141,6 +145,11 @@ def init_db(seed=True):
     if c.execute("SELECT 1 FROM laws WHERE aenderung IS NOT NULL AND n_changes IS NULL LIMIT 1").fetchone():
         c.commit(); recompute_law_metrics(c)
     ucols = [r[1] for r in c.execute("PRAGMA table_info(users)")]
+    if "notify" not in ucols:
+        c.execute("ALTER TABLE users ADD COLUMN notify TEXT DEFAULT 'daily'")    # Benachrichtigungen zu gefolgten Inhalten
+        c.execute("ALTER TABLE users ADD COLUMN last_digest INTEGER")
+    if not c.execute("SELECT 1 FROM meta WHERE k='secret'").fetchone():
+        c.execute("INSERT INTO meta VALUES('secret',?)", (secrets.token_hex(32),))
     if "consent_at" not in ucols:
         c.execute("ALTER TABLE users ADD COLUMN consent_at INTEGER")
         c.execute("ALTER TABLE users ADD COLUMN consent_version TEXT")
@@ -309,6 +318,10 @@ def key_label(c, key, _cache={}):
     n = c.execute("SELECT label FROM norms WHERE gnr=? AND pid=?", (parts[0], parts[1])).fetchone() if len(parts) > 1 else None
     out = ((law["abk"] or law["kurztitel"]) + " ") if law else ""
     if len(parts) > 1 and parts[1] == "gesetz": return out + "(gesamte Rechtsvorschrift)"
+    if parts[0].startswith("9") and len(parts) > 2 and parts[2] != "ganz":
+        r = c.execute("SELECT label, body FROM norms WHERE gnr=? AND pid=?", (parts[0], parts[1])).fetchone()
+        u = next((u for u in json.loads(r["body"])["units"] if u["a"] == parts[2]), None) if r and r["body"] else None
+        return out + (r["label"] if r else parts[1]) + ((" · " + u["n"]) if u and u["n"] else "")
     out += n["label"] if n else (parts[1] if len(parts) > 1 else "")
     if parts[2:] == ["ganz"]: return out + " (gesamt)"
     for p in parts[2:]:
@@ -869,7 +882,7 @@ def draft_bill(c, rows, title=None):
 
 _amend_cache = {}
 def amend_for(c, r):
-    if r["type"] != "prop" or r["removed_at"]: return None
+    if r["type"] != "prop" or r["removed_at"] or is_draft(r["key"][:8]): return None
     k = (r["id"], r["text"], r["base_text"])
     if k not in _amend_cache:
         try: _amend_cache[k] = amendment_instruction(c, r)
@@ -889,7 +902,7 @@ def need(cond, code, msg):
     if not cond: raise ApiError(code, msg)
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "OffenesRecht/1.4"
+    server_version = "OffenesRecht/1.5"
 
     def log_message(self, fmt, *a):
         # bewusst ohne IP-Adresse (Datenschutz); Fehlersuche über Pfad und Status
@@ -919,6 +932,10 @@ class Handler(BaseHTTPRequestHandler):
         for k, v in extra_headers: self.send_header(k, v)
         self.send_cors()
         self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
+
+    def send_raw(self, code, ctype, data):
+        self.send_response(code); self.send_header("Content-Type", ctype); self.send_header("Cache-Control", "no-cache")
+        self.send_header("X-Content-Type-Options", "nosniff"); self.send_header("Content-Length", str(len(data))); self.end_headers(); self.wfile.write(data)
 
     def send_static(self, path):
         name = "index.html" if path in ("/", "") else path.lstrip("/")
@@ -985,6 +1002,10 @@ class Handler(BaseHTTPRequestHandler):
                     if mt and m == method:
                         return self.send_json(200, fn(self, *mt.groups()))
                 raise ApiError(404, "Unbekannter Endpunkt. Übersicht: " + PUBLIC_URL + "/api/v1/openapi.json")
+            if path.startswith("/feed/") or path == "/abmelden":
+                need(method == "GET", 405, "Methode nicht erlaubt.")
+                if path == "/abmelden": return self.send_raw(200, "text/html; charset=utf-8", unsubscribe_page(self.query))
+                return self.send_raw(200, "application/rss+xml; charset=utf-8", feed(path))
             if not path.startswith("/api/"):
                 need(method == "GET", 405, "Methode nicht erlaubt.")
                 return self.send_static(path)
@@ -1463,6 +1484,7 @@ def r_catalog(h):
         for word in q["q"].split()[:5]:
             where.append("(kurztitel LIKE ? OR abk LIKE ? OR titel LIKE ?)"); args += ["%" + word + "%"] * 3
     if q.get("g") in GROUP_NAMES: where.append("tgroup=?"); args.append(q["g"])
+    else: where.append("tgroup!='me'")
     if q.get("idx"): where.append("idx LIKE ?"); args.append(q["idx"] + "%")
     if q.get("mine") == "1": where.append("gnr IN (SELECT DISTINCT substr(key,1,8) FROM contributions)")
     w = (" WHERE " + " AND ".join(where)) if where else ""
@@ -1474,14 +1496,14 @@ def r_catalog(h):
                          (SELECT COUNT(*) FROM contributions WHERE key LIKE l.gnr||'/%' AND removed_at IS NULL) nc FROM laws l {w} ORDER BY {order} LIMIT ? OFFSET ?""",
                      args + [lim, off]).fetchall()
     m = {r["k"]: r["v"] for r in c.execute("SELECT * FROM meta")}
-    groups = {r["tgroup"]: r["n"] for r in c.execute("SELECT tgroup, COUNT(*) n FROM laws GROUP BY tgroup")}
+    groups = {r["tgroup"]: r["n"] for r in c.execute("SELECT tgroup, COUNT(*) n FROM laws WHERE tgroup!='me' GROUP BY tgroup")}
     return {"total": total, "rows": [dict(r) for r in rows],
             "stats": {"laws": int(m.get("total_laws") or 0) or sum(groups.values()), "norms": int(m.get("total_norms") or 0),
                       "groups": {k: groups.get(k, 0) for k in GROUP_NAMES}, "synced": int(m.get("catalog_synced") or 0),
                       "counted": bool(m.get("counts_synced")), "contributions": c.execute("SELECT COUNT(*) FROM contributions").fetchone()[0]}}
 
 def r_sachgebiete(h):
-    rows = db().execute("SELECT idx, COUNT(*) n FROM laws WHERE idx IS NOT NULL GROUP BY idx ORDER BY idx").fetchall()
+    rows = db().execute("SELECT idx, COUNT(*) n FROM laws WHERE idx IS NOT NULL AND tgroup!='me' GROUP BY idx ORDER BY idx").fetchall()
     return {"items": [{"idx": r["idx"], "n": r["n"]} for r in rows]}
 
 def r_law(h):
@@ -1496,6 +1518,9 @@ def r_law(h):
     norms = [{"pid": r["pid"], "label": r["label"], "title": r["title"], "loaded": bool(r["fetched"]), "inkraft": r["inkraft"], "nc": counts.get(r["pid"], 0)}
              for r in c.execute("SELECT pid,label,title,fetched,inkraft FROM norms WHERE gnr=? ORDER BY sort", (gnr,))]
     law = dict(c.execute("SELECT * FROM laws WHERE gnr=?", (gnr,)).fetchone())
+    if is_draft(gnr):
+        dr = c.execute("SELECT * FROM drafts WHERE gnr=?", (gnr,)).fetchone()
+        law["draft"] = draft_view(c, dr) if dr else None
     m = law_metrics(law.pop("aenderung", None), law.get("titel"), law.get("kundmachung"))
     law["metrics"] = {"changes": m["n_changes"], "stf_year": m["stf_year"], "last_year": m["last_year"],
                       "celex": [{"id": x, "url": eurlex(x)} for x in m["celex"]], "last_change": last_change_from(m, c, gnr)}
@@ -1519,7 +1544,7 @@ def r_norm(h):
 # mit API-Schlüssel (Authorization: Bearer …). REST und MCP verwenden dieselben Kernfunktionen.
 from urllib.parse import unquote
 
-APP_VERSION = "1.4"
+APP_VERSION = "1.5"
 READ_LIMIT_PER_MIN = int(os.environ.get("OR_API_READ_LIMIT", "120"))
 WRITE_LIMIT_PER_HOUR = int(os.environ.get("OR_API_WRITE_HOUR", "20"))
 WRITE_LIMIT_PER_DAY = int(os.environ.get("OR_API_WRITE_DAY", "100"))
@@ -1595,9 +1620,11 @@ def api_search_laws(query="", category="", subject_area="", limit=20, offset=0):
     for word in (query or "").split()[:5]:
         where.append("(kurztitel LIKE ? OR abk LIKE ? OR titel LIKE ?)"); args += ["%" + word + "%"] * 3
     cat = {"law": "g", "laws": "g", "gesetz": "g", "g": "g", "regulation": "v", "verordnung": "v", "v": "v",
-           "treaty": "vertrag", "staatsvertrag": "vertrag", "vertrag": "vertrag", "notice": "k", "kundmachung": "k", "k": "k"}.get((category or "").lower())
-    need(not category or cat, 400, "category: law, regulation, treaty oder notice.")
+           "treaty": "vertrag", "staatsvertrag": "vertrag", "vertrag": "vertrag", "notice": "k", "kundmachung": "k", "k": "k",
+           "draft": "me", "entwurf": "me", "me": "me"}.get((category or "").lower())
+    need(not category or cat, 400, "category: law, regulation, treaty, notice oder draft.")
     if cat: where.append("tgroup=?"); args.append(cat)
+    else: where.append("tgroup!='me'")
     if subject_area: where.append("idx LIKE ?"); args.append(subject_area + "%")
     w = (" WHERE " + " AND ".join(where)) if where else ""
     limit = min(100, max(1, int(limit or 20))); offset = max(0, int(offset or 0))
@@ -1818,6 +1845,7 @@ def v1_package(h, pid): _bot(h); return api_package(pid)
 def v1_package_post(h):
     b = _bot(h); d = h.body()
     return api_create_package(b, d.get("title"), d.get("summary"), d.get("proposal_ids") or d.get("items"))
+def v1_drafts(h): _bot(h); return list_drafts(h.query.get("all") not in ("1", "true"))
 def v1_refs(h): _bot(h); return find_references(h.query.get("key", ""))
 def v1_draft(h):
     _bot(h)
@@ -1840,6 +1868,7 @@ API_PATTERNS = [
     ("GET", re.compile(r"^/api/v1/packages/(\d+)$"), v1_package),
     ("GET", re.compile(r"^/api/v1/draft$"), v1_draft),
     ("GET", re.compile(r"^/api/v1/references$"), v1_refs),
+    ("GET", re.compile(r"^/api/v1/drafts$"), v1_drafts),
 ]
 
 # --- MCP (Model Context Protocol, Transport „Streamable HTTP“, zustandslos, JSON-Antworten)
@@ -1853,6 +1882,7 @@ MCP_INSTRUCTIONS = (
     "Bots bewerten nicht. Bewertungsfrage für Vorschläge: 'Fördert diese Änderung Wachstum und Wohlstand für alle?' "
     "Entbehrliche Regeln: propose_repeal (auch ganzer Paragraph oder ganze Rechtsvorschrift). Zusammengehörige Vorschläge: create_package; "
     "jeder Vorschlag und jedes Paket liefert einen Gesetzesentwurf mit Novellierungsanordnungen (draft_bill, get_package). "
+    "Neue Gesetze vor dem Beschluss: list_drafts liefert die Ministerialentwürfe in Begutachtung, kommentierbar wie geltendes Recht. "
     "Vor Änderungen find_references nutzen (Folgeänderungen). Geht eine Regel über EU-Vorgaben hinaus, goldplating=true und celex angeben.")
 
 _RO = {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}
@@ -1919,6 +1949,9 @@ MCP_TOOLS = [
          "goldplating": _s("boolean", "Optional: true, wenn die Stelle über die Vorgaben einer EU-Richtlinie hinausgeht (Übererfüllung, Gold-Plating)"),
          "celex": _s("string", "Optional: CELEX-Nummer des EU-Rechtsakts, z. B. 32006L0123 (get_law liefert die umgesetzten Rechtsakte)")}},
      "annotations": {**_WR, "title": "Streichung vorschlagen"}},
+    {"name": "list_drafts", "title": "Begutachtungsentwürfe",
+     "description": "Ministerialentwürfe, die gerade in Begutachtung sind (Quelle: Parlament, offene Daten), mit Frist. Jeder importierte Entwurf hat eine Gesetzesnummer (gnr, beginnt mit 9) und ist wie eine Rechtsvorschrift les- und kommentierbar: get_law → get_norm (paragraph 'text' für den Entwurfstext, 'erl' für die Erläuterungen).",
+     "inputSchema": {"type": "object", "properties": {"include_closed": _s("boolean", "Auch abgeschlossene, bereits importierte Entwürfe")}}, "annotations": {**_RO, "title": "Begutachtungsentwürfe"}},
     {"name": "find_references", "title": "Folgenprüfung: Verweise auf eine Stelle",
      "description": "Findet Stellen, die auf einen Paragraphen oder Absatz verweisen: im selben Gesetz (Normtext) und in anderen Rechtsvorschriften (RIS-Volltextsuche). Vor Änderungs- oder Streichungsvorschlägen nutzen, um Folgeänderungen zu erkennen; gefundene Probleme als Kommentar an der betroffenen Stelle melden.",
      "inputSchema": {"type": "object", "required": ["key"], "properties": {
@@ -1957,6 +1990,7 @@ def mcp_call(name, a, bot):
     if name == "post_comment": return api_post(bot, a.get("key"), "comment", a.get("text"), quote=a.get("quote"), goldplating=a.get("goldplating"), celex=a.get("celex"))
     if name == "propose_amendment": return api_post(bot, a.get("key"), "proposal", a.get("new_text"), reason=a.get("reason"), goldplating=a.get("goldplating"), celex=a.get("celex"))
     if name == "find_references": return find_references(a.get("key"))
+    if name == "list_drafts": return list_drafts(not a.get("include_closed"))
     if name == "propose_repeal": return api_post(bot, a.get("key"), "repeal", None, reason=a.get("reason"), goldplating=a.get("goldplating"), celex=a.get("celex"))
     if name == "list_packages": return api_list_packages(a.get("limit", 20), a.get("offset", 0))
     if name == "get_package": return api_package(a.get("id", 0))
@@ -2037,6 +2071,7 @@ def openapi_spec():
                                                   "title": {"type": "string"}, "summary": {"type": "string"}, "proposal_ids": {"type": "array", "items": {"type": "integer"}}}}}}},
                                               "responses": ok}},
                 "/api/v1/packages/{id}": {"get": {"summary": "Reformpaket mit Gesetzesentwurf", "parameters": [P("id", "path", "Paket-ID", "integer", True)], "responses": ok}},
+                "/api/v1/drafts": {"get": {"summary": "Begutachtungsentwürfe (Ministerialentwürfe) mit Frist", "parameters": [P("all", "query", "1 = auch abgeschlossene", "string")], "responses": ok}},
                 "/api/v1/references": {"get": {"summary": "Folgenprüfung: Verweise auf eine Stelle", "parameters": [P("key", "query", "Stelle oder Paragraph", "string", True)], "responses": ok}},
                 "/api/v1/draft": {"get": {"summary": "Gesetzesentwurf aus Vorschlägen", "parameters": [P("ids", "query", "Kommagetrennte Vorschlags-IDs", "string", True)], "responses": ok}},
                 "/mcp": {"post": {"summary": "MCP-Server (Streamable HTTP, JSON-RPC 2.0)", "responses": ok}}}}
@@ -2127,6 +2162,7 @@ def find_references(key):
     if hit and time.time() - hit[0] < REF_TTL: return hit[1]
     c = db(); parts = key.split("/"); gnr, pid = parts[0], parts[1]
     need(pid != "gesetz", 400, "Für eine ganze Rechtsvorschrift bitte die RIS-Volltextsuche nach ihrem Titel verwenden.")
+    need(not is_draft(gnr), 400, "Für Begutachtungsentwürfe gibt es noch keine Verweissuche.")
     n = c.execute("SELECT label FROM norms WHERE gnr=? AND pid=?", (gnr, pid)).fetchone(); need(n, 404, "Norm nicht gefunden.")
     am = re.match(r"abs(\d+[a-z]?)", parts[2]) if len(parts) > 2 else None
     abs_no = am.group(1) if am else None
@@ -2146,15 +2182,15 @@ def zahlen():
     hit = _zahlen_cache.get("z")
     if hit and time.time() - hit[0] < 3600: return hit[1]
     c = db(); by_year = {}; by_decade = {}; celex = set(); total_changes = 0
-    for r in c.execute("SELECT aenderung, titel, kundmachung, tgroup FROM laws"):
+    for r in c.execute("SELECT aenderung, titel, kundmachung, tgroup FROM laws WHERE tgroup!='me'"):
         m = law_metrics(r["aenderung"], r["titel"], r["kundmachung"])
         total_changes += m["n_changes"]; celex.update(m["celex"])
         for y in m["years"]: by_year[y] = by_year.get(y, 0) + 1
         if m["stf_year"]: d = m["stf_year"] // 10 * 10; by_decade[d] = by_decade.get(d, 0) + 1
     cols = "gnr, kurztitel, abk, typ, tgroup, n_norms, n_changes, n_celex, stf_year, last_year"
-    top = lambda order, where="1": [dict(r) for r in c.execute(f"SELECT {cols} FROM laws WHERE {where} ORDER BY {order} LIMIT 15")]
+    top = lambda order, where="1": [dict(r) for r in c.execute(f"SELECT {cols} FROM laws WHERE tgroup!='me' AND {where} ORDER BY {order} LIMIT 15")]
     m = {r["k"]: r["v"] for r in c.execute("SELECT * FROM meta")}
-    res = {"laws": c.execute("SELECT COUNT(*) FROM laws").fetchone()[0], "norms": int(m.get("total_norms") or 0),
+    res = {"laws": c.execute("SELECT COUNT(*) FROM laws WHERE tgroup!='me'").fetchone()[0], "norms": int(m.get("total_norms") or 0),
            "changes": total_changes, "celex": len(celex),
            "laws_with_eu": c.execute("SELECT COUNT(*) FROM laws WHERE n_celex>0").fetchone()[0],
            "by_year": sorted([[y, n] for y, n in by_year.items() if 1945 <= y <= datetime.date.today().year]),
@@ -2175,6 +2211,345 @@ def r_zahlen(h):
                 "gold": serialize(sorted(gold, key=lambda r: -st[r["id"]]["score"]), st, all_users(c))})
     return res
 
+# ---------- Begutachtungsentwürfe (Parlament, offene Daten) ----------
+# Entwürfe werden wie Rechtsvorschriften gespeichert: Pseudo-Gesetzesnummer 9GGNNNNN (GG = Gesetzgebungsperiode,
+# NNNNN = Nummer des Ministerialentwurfs), tgroup 'me', Normen 'text' (Gesetzestext) und 'erl' (Erläuterungen).
+from html.parser import HTMLParser
+PARL = "https://www.parlament.gv.at"
+DRAFT_GP = os.environ.get("OR_DRAFT_GP", "XXVIII")
+def _roman(r):
+    v = {"I": 1, "V": 5, "X": 10, "L": 50, "C": 100}; t = 0
+    for i, ch in enumerate(r):
+        n = v[ch]; t += -n if i + 1 < len(r) and v[r[i + 1]] > n else n
+    return t
+def draft_gnr(gp, inr): return f"9{_roman(gp):02d}{int(inr):05d}"
+def is_draft(gnr): return str(gnr).startswith("9")
+
+class _P(HTMLParser):
+    """Absätze (<p>) eines Word-HTML-Dokuments mit Formatvorlagen-Klasse."""
+    def __init__(self):
+        super().__init__(convert_charrefs=True); self.out = []; self.cur = None; self.depth = 0; self.skip = 0
+    def handle_starttag(self, tag, attrs):
+        a = dict(attrs)
+        if tag in ("style", "script", "head"): self.skip += 1
+        if tag == "p" and self.cur is None: self.cur = [a.get("class") or "", []]
+        elif tag == "br" and self.cur is not None: self.cur[1].append(" ")
+    def handle_endtag(self, tag):
+        if tag in ("style", "script", "head"): self.skip = max(0, self.skip - 1)
+        if tag == "p" and self.cur is not None:
+            t = re.sub(r"\s+", " ", "".join(self.cur[1])).strip()
+            if t: self.out.append((self.cur[0], t))
+            self.cur = None
+    def handle_data(self, d):
+        if self.cur is not None and not self.skip: self.cur[1].append(d)
+
+def parse_draft_html(raw, erl=False):
+    """Entwurfstext -> Einheiten wie bei RIS-Normen. Gliederung aus den Formatvorlagen des Bundes (Novellierungsanordnung, §, Absatz, Ziffer)."""
+    for enc in ("utf-8", "windows-1252", "latin-1"):
+        try: txt = raw.decode(enc); break
+        except UnicodeDecodeError: continue
+    p = _P(); p.feed(txt)
+    units, heads = [], []; art = z = para = ab = zi = None; head = ""
+    for cls, t in p.out:
+        c = cls.lower()
+        if c.startswith("10entwurf") or c.startswith("11titel") or c.startswith("12prom"):
+            heads.append({"typ": "titel", "t": t}); continue
+        if re.match(r"^4[1-4]ueberschr", c) or (erl and len(t) < 160 and (c.startswith("4") or re.match(r"^(Zu |Allgemeiner Teil|Besonderer Teil|Hauptgesichtspunkte|Kompetenz)", t))):
+            ma = re.match(r"^Artikel\s+(\d+[a-z]?)", t)
+            if ma: art = "Art. " + ma.group(1); z = para = ab = zi = None
+            head = t
+            units.append({"a": f"t{len(units)+1}", "n": "", "t": t, "lvl": 0}); continue
+        if erl:
+            units.append({"a": f"t{len(units)+1}", "n": head[:60], "t": t, "lvl": 1}); continue
+        mz = re.match(r"^(\d+[a-z]?)\.\s", t)
+        if c.startswith("2") and "novao" in c and mz: z = mz.group(1); para = ab = zi = None
+        mp = re.match(r"^„?(§\s*\d+[a-z]*|Art(?:ikel|\.)\s*\d+[a-z]*)\.?\s*(?:\((\d+[a-z]?)\))?", t)
+        if mp and not c.startswith("2"): para = re.sub(r"\s+", " ", mp.group(1)).replace("Artikel", "Art."); ab = mp.group(2); zi = None
+        ma = re.match(r"^„?\((\d+[a-z]?)\)", t)
+        if ma and not c.startswith("2"): ab = ma.group(1); zi = None
+        lit = None
+        if c.startswith("52aufzaehle1") and mz: zi = mz.group(1)
+        ml = re.match(r"^([a-z]{1,2})\)\s", t)
+        if ml and not c.startswith("2"): lit = ml.group(1)
+        inner = " ".join(x for x in ((para or ""), (f"Abs. {ab}" if ab else ""), (f"Z {zi}" if zi and not c.startswith("2") else ""), (f"lit. {lit}" if lit else "")) if x)
+        lbl = " · ".join(x for x in ((art or ""), (f"Pkt. {z}" if z else ""), inner) if x)
+        lvl = 0 if c.startswith("2") else 1
+        units.append({"a": f"t{len(units)+1}", "n": lbl, "t": t, "lvl": lvl})
+    title = next((h["t"] for h in heads if h["typ"] == "titel" and not h["t"].lower().startswith("entwurf")), "")
+    return {"heads": heads[:3], "units": units, "title": title}
+
+
+def _parl_get(path, body=None):
+    req = urllib.request.Request(PARL + path, data=json.dumps(body).encode() if body is not None else None,
+                                 headers={"User-Agent": RIS_UA, "Accept": "application/json", "Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=40) as r: return r.read()
+
+def _iso(d):
+    m = re.fullmatch(r"(\d{2})\.(\d{2})\.(\d{4})", (d or "").strip())
+    return f"{m.group(3)}-{m.group(2)}-{m.group(1)}" if m else None
+
+def import_draft(c, row):
+    gnr = draft_gnr(row["gp"], row["inr"])
+    d = json.loads(_parl_get(f"/gegenstand/{row['gp']}/ME/{row['inr']}?json=TRUE"))["content"]
+    docs = {}
+    for grp in d.get("documents") or []:
+        t = (grp.get("title") or "").lower()
+        html_ = next((x["link"] for x in grp.get("documents", []) if x.get("type") == "HTML"), None)
+        if not html_: continue
+        if "gegenüberstellung" in t: continue
+        if ("text" in t or "entwurf" in t) and "text" not in docs: docs["text"] = (html_, "Entwurfstext")
+        elif "erläuterung" in t and "erl" not in docs: docs["erl"] = (html_, "Erläuterungen")
+    if "text" not in docs: return False
+    c.execute("""INSERT INTO laws(gnr,kurztitel,titel,abk,typ,tgroup,idx,kundmachung,inkraft,eli,synced,norms_listed) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+                 ON CONFLICT(gnr) DO UPDATE SET kurztitel=excluded.kurztitel,titel=excluded.titel,idx=excluded.idx,eli=excluded.eli,synced=excluded.synced""",
+              (gnr, row["title"], d.get("description") or row["title"], f"{row['inr']}/ME", "Ministerialentwurf", "me", row["ministry"],
+               None, row["einlangen"], PARL + f"/gegenstand/{row['gp']}/ME/{row['inr']}", now(), now()))
+    n = 0
+    for i, (pid, (link, label)) in enumerate(sorted(docs.items(), key=lambda x: x[0] != "text")):
+        body = parse_draft_html(_parl_get(link), erl=(pid == "erl"))
+        if not body["title"]: body["title"] = label
+        nor = f"ME{gnr}{pid}"
+        c.execute("""INSERT INTO norms(nor,gnr,pid,label,sort,inkraft,xml_url,title,body,fetched,kundmachung) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+                     ON CONFLICT(nor) DO UPDATE SET body=excluded.body,title=excluded.title,fetched=excluded.fetched""",
+                  (nor, gnr, pid, label, i, row["einlangen"], PARL + link, body["title"], json.dumps(body, ensure_ascii=False), now(), ""))
+        n += 1
+    c.execute("UPDATE laws SET n_norms=? WHERE gnr=?", (n, gnr)); c.commit()
+    return True
+
+def sync_drafts():
+    """Liste der Ministerialentwürfe der laufenden Gesetzgebungsperiode; laufende Begutachtungen importieren."""
+    c = sqlite3.connect(DB_PATH, timeout=30); c.row_factory = sqlite3.Row
+    d = json.loads(_parl_get("/Filter/api/filter/data/81?js=eval&showAll=true", {"GP_CODE": [DRAFT_GP]}))
+    h = [x["label"] for x in d["header"]]; new = 0
+    for r in (dict(zip(h, x)) for x in d["rows"]):
+        if r.get("ITYP") != "ME": continue
+        gnr = draft_gnr(r["Gesetzgebungsperiode"], r["INR"])
+        row = {"gp": r["Gesetzgebungsperiode"], "inr": r["INR"], "title": r["Betreff"], "ressort": r.get("Ressort"),
+               "ministry": r.get("Ministerium"), "frist": _iso(r.get("Frist")), "einlangen": _iso(r.get("Einlangen")),
+               "active": 1 if r.get("Begutachtung aktiv?") == "J" else 0, "statements": r.get("Stellungnahmen") or 0}
+        c.execute("""INSERT INTO drafts(gnr,gp,inr,title,ressort,ministry,frist,einlangen,url,active,statements,synced) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+                     ON CONFLICT(gnr) DO UPDATE SET title=excluded.title,frist=excluded.frist,active=excluded.active,statements=excluded.statements,synced=excluded.synced""",
+                  (gnr, row["gp"], row["inr"], row["title"], row["ressort"], row["ministry"], row["frist"], row["einlangen"],
+                   PARL + r["uri"], row["active"], row["statements"], now()))
+        has = c.execute("SELECT 1 FROM norms WHERE gnr=? LIMIT 1", (gnr,)).fetchone()
+        if row["active"] and not has:
+            try:
+                if import_draft(c, row): new += 1
+            except Exception as e: sys.stderr.write("Entwurf %s: %r\n" % (gnr, e))
+            time.sleep(1)
+    c.execute("INSERT OR REPLACE INTO meta VALUES('drafts_synced',?)", (str(now()),)); c.commit(); c.close()
+    sys.stderr.write(f"Begutachtungsentwürfe: {new} neu importiert\n")
+
+def draft_view(c, r):
+    nc = c.execute("SELECT COUNT(*) FROM contributions WHERE key LIKE ? AND removed_at IS NULL", (r["gnr"] + "/%",)).fetchone()[0]
+    imported = bool(c.execute("SELECT 1 FROM norms WHERE gnr=? LIMIT 1", (r["gnr"],)).fetchone())
+    return {"gnr": r["gnr"], "nr": f"{r['inr']}/ME", "gp": r["gp"], "title": r["title"], "ressort": r["ressort"], "ministry": r["ministry"],
+            "deadline": r["frist"], "received": r["einlangen"], "active": bool(r["active"]), "statements_parliament": r["statements"],
+            "parliament_url": r["url"], "contributions": nc, "commentable": imported, "url": f"{PUBLIC_URL}/#/g/{r['gnr']}" if imported else None}
+
+def list_drafts(active_only=True):
+    c = db()
+    rows = c.execute("SELECT * FROM drafts" + (" WHERE active=1" if active_only else "") + " ORDER BY frist" + ("" if active_only else " DESC")).fetchall()
+    return {"drafts": [draft_view(c, r) for r in rows if r["active"] or c.execute("SELECT 1 FROM norms WHERE gnr=? LIMIT 1", (r["gnr"],)).fetchone()],
+            "synced": int((c.execute("SELECT v FROM meta WHERE k='drafts_synced'").fetchone() or [0])[0])}
+
+def r_drafts(h): return list_drafts(h.query.get("all") != "1")
+
+# ---------- Folgen und Benachrichtigungen ----------
+FOLLOW_KINDS = {"law": "Rechtsvorschrift", "c": "Beitrag", "pkg": "Reformpaket"}
+def _follow_snapshot(c, kind, ref):
+    if kind == "law":
+        r = c.execute("SELECT n_changes FROM laws WHERE gnr=?", (ref,)).fetchone(); need(r, 404, "Rechtsvorschrift nicht gefunden.")
+        return r["n_changes"] or 0, None
+    if kind == "c":
+        r = c.execute("SELECT * FROM contributions WHERE id=? AND removed_at IS NULL", (int(ref),)).fetchone(); need(r, 404, "Beitrag nicht gefunden.")
+        return None, contribution_stats(c, [r])[r["id"]]["status"]
+    r = c.execute("SELECT id FROM packages WHERE id=? AND removed_at IS NULL", (int(ref),)).fetchone(); need(r, 404, "Paket nicht gefunden.")
+    return None, package_stats(c, r["id"])["status"]
+
+def r_follow(h):
+    u = h.session_user(); need(u, 401, "Bitte anmelden, um zu folgen.")
+    d = h.body(); kind = d.get("kind"); ref = str(d.get("ref") or "")
+    need(kind in FOLLOW_KINDS and re.fullmatch(r"\d{1,9}", ref), 400, "Ungültige Angabe.")
+    c = db()
+    if d.get("on", True):
+        need(c.execute("SELECT COUNT(*) FROM follows WHERE user_id=?", (u["id"],)).fetchone()[0] < 500, 429, "Höchstens 500 gefolgte Inhalte.")
+        cnt, st = _follow_snapshot(c, kind, ref)
+        c.execute("INSERT OR IGNORE INTO follows VALUES(?,?,?,?,?,?)", (u["id"], kind, ref, now(), cnt, st))
+    else:
+        c.execute("DELETE FROM follows WHERE user_id=? AND kind=? AND ref=?", (u["id"], kind, ref))
+    c.commit(); return {"ok": True}
+
+def r_follows(h):
+    u = h.session_user(); need(u, 401, "Bitte anmelden.")
+    c = db(); out = []
+    for f in c.execute("SELECT * FROM follows WHERE user_id=? ORDER BY created DESC", (u["id"],)):
+        if f["kind"] == "law":
+            l = c.execute("SELECT kurztitel, abk FROM laws WHERE gnr=?", (f["ref"],)).fetchone()
+            label, url = (l["kurztitel"] if l else f["ref"]), f"#/g/{f['ref']}"
+        elif f["kind"] == "c":
+            r = c.execute("SELECT key FROM contributions WHERE id=?", (int(f["ref"]),)).fetchone()
+            label, url = (f"Beitrag zu {key_label(c, r['key'])}" if r else "Gelöschter Beitrag"), (f"#/g/{r['key']}" if r else "#/")
+        else:
+            r = c.execute("SELECT title FROM packages WHERE id=?", (int(f["ref"]),)).fetchone()
+            label, url = (f"Paket „{r['title']}“" if r else "Gelöschtes Paket"), f"#/paket/{f['ref']}"
+        out.append({"kind": f["kind"], "ref": f["ref"], "label": label, "url": url, "since": f["created"]})
+    return {"follows": out, "notify": u["notify"] or "daily"}
+
+def r_notify(h):
+    u = h.session_user(); need(u, 401, "Bitte anmelden.")
+    v = h.body().get("notify"); need(v in ("daily", "weekly", "off"), 400, "daily, weekly oder off.")
+    db().execute("UPDATE users SET notify=? WHERE id=?", (v, u["id"])); db().commit(); return {"ok": True}
+
+def _secret():
+    return db().execute("SELECT v FROM meta WHERE k='secret'").fetchone()[0]
+def unsubscribe_token(uid):
+    import hmac
+    return hmac.new(_secret().encode(), f"unsub:{uid}".encode(), "sha256").hexdigest()[:32]
+
+def digest_for(c, u, since):
+    """Neuigkeiten zu den gefolgten Inhalten eines Kontos seit 'since'. Gibt (Abschnitte, Aktualisierungen) zurück."""
+    parts, updates = [], []
+    for f in c.execute("SELECT * FROM follows WHERE user_id=?", (u["id"],)).fetchall():
+        since_f = max(since, f["created"])
+        if f["kind"] == "law":
+            l = c.execute("SELECT * FROM laws WHERE gnr=?", (f["ref"],)).fetchone()
+            if not l: continue
+            lines = []
+            new = c.execute("""SELECT * FROM contributions WHERE key LIKE ? AND created>? AND removed_at IS NULL AND user_id!=? ORDER BY id""",
+                            (f["ref"] + "/%", since_f, u["id"])).fetchall()
+            if new:
+                np = sum(1 for r in new if r["type"] == "prop")
+                lines.append((f"{len(new)} neue Beiträge" if len(new) > 1 else "1 neuer Beitrag") + (f", davon {np} {'Vorschlag' if np == 1 else 'Vorschläge'}:" if np else ":"))
+                for r in new[:5]:
+                    lines.append(f"  · {key_label(c, r['key'])}: " + ("Streichung" if r["op"] == "repeal" else (r["text"] or "")[:110].replace("\n", " ")))
+                if len(new) > 5: lines.append(f"  … und {len(new) - 5} weitere")
+            if (l["n_changes"] or 0) > (f["seen_count"] or 0) and not is_draft(f["ref"]):
+                lines.append(f"Neue Fassung im RIS: zuletzt geändert durch {last_change(l['aenderung']) or 'eine neue Kundmachung'}.")
+                updates.append(("UPDATE follows SET seen_count=? WHERE user_id=? AND kind='law' AND ref=?", (l["n_changes"], u["id"], f["ref"])))
+            if is_draft(f["ref"]):
+                dr = c.execute("SELECT frist FROM drafts WHERE gnr=?", (f["ref"],)).fetchone()
+                if dr and dr["frist"]:
+                    left = (datetime.date.fromisoformat(dr["frist"]) - datetime.date.today()).days
+                    if 0 <= left <= 3 and f["seen_status"] != "frist":
+                        lines.append(f"Die Begutachtungsfrist endet am {fmt_de(dr['frist'])}.")
+                        updates.append(("UPDATE follows SET seen_status='frist' WHERE user_id=? AND kind='law' AND ref=?", (u["id"], f["ref"])))
+            if lines: parts.append((f"{l['kurztitel']}", f"{PUBLIC_URL}/#/g/{f['ref']}", lines))
+        elif f["kind"] == "c":
+            r = c.execute("SELECT * FROM contributions WHERE id=?", (int(f["ref"]),)).fetchone()
+            if not r: continue
+            lines = []
+            if r["removed_at"] and f["seen_status"] != "Entfernt":
+                lines.append(f"Von der Moderation entfernt: {REMOVE_REASONS.get(r['removed_reason'], '')}.")
+                updates.append(("UPDATE follows SET seen_status='Entfernt' WHERE user_id=? AND kind='c' AND ref=?", (u["id"], f["ref"])))
+            elif not r["removed_at"]:
+                st = contribution_stats(c, [r])[r["id"]]
+                if st["status"] != f["seen_status"] and st["status"] != "Neu":
+                    lines.append(f"Neuer Status: {st['status']} ({round(st['share'] * 100)} % Zustimmung, {st['total']} Stimmen).")
+                    updates.append(("UPDATE follows SET seen_status=? WHERE user_id=? AND kind='c' AND ref=?", (st["status"], u["id"], f["ref"])))
+                rival = c.execute("SELECT COUNT(*) FROM contributions WHERE key=? AND type='prop' AND id!=? AND created>? AND removed_at IS NULL",
+                                  (r["key"], r["id"], since_f)).fetchone()[0]
+                if rival and r["type"] == "prop": lines.append(f"{rival} neue konkurrierende Formulierung(en) an derselben Stelle.")
+            if lines: parts.append((f"Beitrag zu {key_label(c, r['key'])}", f"{PUBLIC_URL}/#/g/{r['key']}", lines))
+        else:
+            p = c.execute("SELECT * FROM packages WHERE id=?", (int(f["ref"]),)).fetchone()
+            if not p: continue
+            lines = []
+            if p["updated"] > since_f and p["user_id"] != u["id"]: lines.append("Das Paket wurde geändert.")
+            st = package_stats(c, p["id"])["status"]
+            if st != f["seen_status"] and st != "Neu":
+                lines.append(f"Neuer Status: {st}.")
+                updates.append(("UPDATE follows SET seen_status=? WHERE user_id=? AND kind='pkg' AND ref=?", (st, u["id"], f["ref"])))
+            if lines: parts.append((f"Reformpaket „{p['title']}“", f"{PUBLIC_URL}/#/paket/{p['id']}", lines))
+    return parts, updates
+
+def fmt_de(iso_d):
+    try: return datetime.date.fromisoformat(iso_d).strftime("%d.%m.%Y")
+    except Exception: return iso_d or ""
+
+def send_digests(force_user=None):
+    """Tägliche (oder wöchentliche) Zusammenfassung an alle, die etwas folgen. Nur wenn es Neues gibt."""
+    if not os.environ.get("OR_SMTP_HOST"): return 0
+    c = sqlite3.connect(DB_PATH, timeout=30); c.row_factory = sqlite3.Row
+    _local.db = c
+    sent = 0
+    try:
+        q = "SELECT * FROM users WHERE status='active' AND role!='bot' AND notify IN ('daily','weekly') AND id IN (SELECT user_id FROM follows)"
+        for u in c.execute(q).fetchall():
+            if force_user and u["id"] != force_user: continue
+            gap = 86400 if u["notify"] == "daily" else 7 * 86400
+            last = u["last_digest"] or 0
+            if not force_user and now() - last < gap - 3600: continue
+            parts, updates = digest_for(c, u, last or (now() - gap))
+            for sql, args in updates: c.execute(sql, args)
+            c.execute("UPDATE users SET last_digest=? WHERE id=?", (now(), u["id"])); c.commit()
+            if not parts: continue
+            body = [f"Guten Morgen, {u['name']}!", "", "Neues zu den Inhalten, denen Sie auf Offenes Recht folgen:", ""]
+            for title, url, lines in parts:
+                body += [title, url] + lines + [""]
+            body += ["Einstellungen und gefolgte Inhalte: " + PUBLIC_URL + "/#/  → Mein Konto",
+                     "Keine solchen E-Mails mehr: " + f"{PUBLIC_URL}/abmelden?u={u['id']}&t={unsubscribe_token(u['id'])}"]
+            try:
+                send_mail(u["email"], f"Offenes Recht: Neues zu {len(parts)} gefolgten Inhalt{'en' if len(parts) > 1 else ''}", "\n".join(body)); sent += 1
+            except Exception as e: sys.stderr.write("Zusammenfassung an Konto %s: %r\n" % (u["id"], e))
+    finally:
+        _local.db = None; c.close()
+    if sent: sys.stderr.write(f"Zusammenfassungen versandt: {sent}\n")
+    return sent
+
+def scheduler():
+    """Hintergrund: Begutachtungsentwürfe alle 6 Stunden, Zusammenfassungen täglich ab 7 Uhr."""
+    time.sleep(20)
+    while True:
+        try:
+            c = db()
+            last = c.execute("SELECT v FROM meta WHERE k='drafts_synced'").fetchone()
+            if not last or now() - int(last[0]) > 6 * 3600: sync_drafts()
+        except Exception as e: sys.stderr.write("Entwürfe: %r\n" % e)
+        try:
+            if 7 <= time.localtime().tm_hour < 22: send_digests()
+        except Exception as e: sys.stderr.write("Zusammenfassungen: %r\n" % e)
+        time.sleep(1800)
+
+# ---------- RSS ----------
+def rss(title, link, items):
+    from xml.sax.saxutils import escape as x
+    out = ['<?xml version="1.0" encoding="utf-8"?>', '<rss version="2.0"><channel>', f"<title>{x(title)}</title>", f"<link>{x(link)}</link>",
+           "<description>Beiträge auf Offenes Recht</description>", "<language>de-at</language>"]
+    for it in items:
+        out.append(f"<item><title>{x(it['title'])}</title><link>{x(it['link'])}</link><guid isPermaLink=\"false\">{x(it['guid'])}</guid>"
+                   f"<pubDate>{email.utils.formatdate(it['ts'], usegmt=True)}</pubDate><description>{x(it['text'])}</description></item>")
+    out.append("</channel></rss>")
+    return "\n".join(out).encode()
+
+def feed(path):
+    c = db(); m = re.fullmatch(r"/feed/(?:gesetz/(\d{8})|neu)\.xml", path)
+    need(m, 404, "Unbekannter Feed.")
+    gnr = m.group(1)
+    if gnr:
+        l = c.execute("SELECT kurztitel FROM laws WHERE gnr=?", (gnr,)).fetchone(); need(l, 404, "Rechtsvorschrift nicht gefunden.")
+        rows = c.execute("SELECT * FROM contributions WHERE key LIKE ? AND removed_at IS NULL ORDER BY id DESC LIMIT 50", (gnr + "/%",)).fetchall()
+        title, link = f"Offenes Recht: {l['kurztitel']}", f"{PUBLIC_URL}/#/g/{gnr}"
+    else:
+        rows = c.execute("SELECT * FROM contributions WHERE removed_at IS NULL ORDER BY id DESC LIMIT 50").fetchall()
+        title, link = "Offenes Recht: neue Beiträge", PUBLIC_URL
+    users = all_users(c)
+    items = [{"title": f"{'Streichung' if r['op'] == 'repeal' else 'Vorschlag' if r['type'] == 'prop' else 'Kommentar'}: {key_label(c, r['key'])}",
+              "link": web_url(r["key"]), "guid": f"or-{r['id']}", "ts": r["created"],
+              "text": ((users.get(r["user_id"]) or {}).get("name") or "") + ": " + ((r["text"] or "") if r["op"] != "repeal" else "Ersatzlos streichen. " + (r["why"] or ""))[:1000]}
+             for r in rows]
+    return rss(title, link, items)
+
+def unsubscribe_page(q):
+    import hmac
+    uid = q.get("u", ""); t = q.get("t", "")
+    ok = uid.isdigit() and hmac.compare_digest(t, unsubscribe_token(int(uid)))
+    if ok: db().execute("UPDATE users SET notify='off' WHERE id=?", (int(uid),)); db().commit()
+    msg = "Sie erhalten keine Benachrichtigungen mehr. Unter „Mein Konto“ können Sie sie jederzeit wieder einschalten." if ok else "Der Link ist ungültig."
+    return (f'<!doctype html><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Offenes Recht</title>'
+            f'<body style="font-family:system-ui,sans-serif;max-width:560px;margin:60px auto;padding:0 16px;color:#1A1F2B;background:#F5F6F8">'
+            f'<h1 style="font-size:22px">Benachrichtigungen</h1><p>{msg}</p><p><a href="/">Zur Startseite</a></p></body>').encode()
+
 # ---------- Reformpakete ----------
 PKG_MAX = 100
 def _pkg_items(c, pid):
@@ -2188,6 +2563,7 @@ def _check_items(c, ids):
     for i in ids:
         r = rows.get(i)
         need(r and r["type"] == "prop" and not r["removed_at"], 400, f"Beitrag {i} ist kein verfügbarer Änderungsvorschlag.")
+        need(not is_draft(r["key"][:8]), 400, "Vorschläge zu Begutachtungsentwürfen gehören in die Stellungnahme, nicht in ein Reformpaket.")
     keys = [rows[i]["key"] for i in ids]
     for a in range(len(keys)):
         for b in range(a + 1, len(keys)):
@@ -2328,7 +2704,8 @@ ROUTES = {
     ("POST", "/api/report"): r_report, ("GET", "/api/moderation"): r_moderation_log, ("POST", "/api/account/renew-key"): r_renew_key,
     ("GET", "/api/packages"): r_packages, ("GET", "/api/package"): r_package, ("POST", "/api/packages"): r_package_create,
     ("POST", "/api/package/update"): r_package_update, ("POST", "/api/package/add"): r_package_add, ("POST", "/api/package/rate"): r_package_rate,
-    ("GET", "/api/draft"): r_draft, ("GET", "/api/references"): r_references, ("GET", "/api/zahlen"): r_zahlen,
+    ("GET", "/api/draft"): r_draft, ("GET", "/api/drafts"): r_drafts,
+    ("POST", "/api/follow"): r_follow, ("GET", "/api/follows"): r_follows, ("POST", "/api/account/notify"): r_notify, ("GET", "/api/references"): r_references, ("GET", "/api/zahlen"): r_zahlen,
 }
 
 # ---------- Kommandozeile ----------
@@ -2346,6 +2723,7 @@ def main():
         print(f"Offenes Recht läuft auf http://{a.host}:{a.port}  (DB {DB_PATH})", flush=True)
         if os.environ.get("OR_NO_RIS") != "1":
             threading.Thread(target=ris_background, daemon=True).start()
+            threading.Thread(target=scheduler, daemon=True).start()
         ThreadingHTTPServer((a.host, a.port), Handler).serve_forever()
     elif a.cmd == "user-add":
         email, name = a.args[0].lower(), " ".join(a.args[1:]) or a.args[0]
