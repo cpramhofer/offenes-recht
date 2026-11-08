@@ -38,7 +38,9 @@ function toast(msg){ const t = document.createElement("div"); t.className="toast
 // ---- Adressen: Schlüssel "gnr/pid/abs2/z1"
 function unitLabel(key){
   const [gnr, pid, ...rest] = key.split("/");
+  if (pid==="gesetz") return "Gesamte Rechtsvorschrift";
   const n = S.norms.find(x => x.pid===pid);
+  if (rest[0]==="ganz") return (n ? n.label : pid) + " (gesamt)";
   let l = n ? n.label : pid;
   rest.forEach(p => {
     let m;
@@ -50,9 +52,12 @@ function unitLabel(key){
   return l;
 }
 function unitOf(key){
-  const parts = key.split("/"), body = S.texts[parts[1]];
+  const parts = key.split("/");
+  if (parts[1]==="gesetz") return S.law ? {a:"ganz", n:"", t:S.law.kurztitel+" (gesamte Rechtsvorschrift)", whole:"gesetz"} : null;
+  const body = S.texts[parts[1]];
   if (!body) return null;
   const a = parts.slice(2).join("/");
+  if (a==="ganz") return {a, n:"", t:body.units.map(u => (u.n+" "+u.t).trim()).join(" "), whole:"ganz"};
   return body.units.find(u => u.a===a) || null;
 }
 const lawKurz = () => S.law ? (S.law.abk || S.law.kurztitel) : "";
@@ -63,8 +68,9 @@ function go(hash){ if (location.hash !== hash) location.hash = hash; else route(
 async function route(){
   const p = location.hash.replace(/^#\/?/, "").split("/").filter(Boolean);
   S.compare = false;
-  if (["impressum","datenschutz","reset","api","projekt","moderation"].includes(p[0])){
+  if (["impressum","datenschutz","reset","api","projekt","moderation","paket"].includes(p[0])){
     if (p[0]==="moderation"){ try { S.modlog = await api("/api/moderation"); } catch(e){ S.modlog = {removed:[], stats:{}}; } }
+    if (p[0]==="paket"){ try { S.pkg = await api("/api/package?id="+(+p[1]||0)); } catch(e){ S.pkg = {error:e.message}; } }
     S.mode = "home"; S.gnr = null; S.law = null; S.page = p[0]; S.resetToken = p[1] || null;
     if (S.panel==="anchor") S.panel = "default";
     if (!S.all) await loadAll().catch(()=>{});
@@ -78,7 +84,8 @@ async function route(){
     S.mode = "law";
     if (S.gnr !== p[1]) await openLaw(p[1]);
     if (!S.law) return;
-    const pid = p[2] || (S.norms.find(n => n.label!=="§ 0") || S.norms[0] || {}).pid;
+    const first = (S.norms.find(n => n.label!=="§ 0") || S.norms[0] || {}).pid;
+    const pid = p[2]==="gesetz" ? first : (p[2] || first);
     if (pid) await openNorm(pid, p.length > 3 ? p.join("/").replace(/^g\//,"") : null);
     else render();
   } else {
@@ -98,7 +105,12 @@ async function loadCatalog(reset){
   const j = await api("/api/catalog?"+qs);
   c.total = j.total; c.stats = j.stats; c.rows = reset ? j.rows : c.rows.concat(j.rows);
 }
-async function loadAll(){ const j = await api("/api/state"); S.all = j.contributions; S.user = j.user; S.myRatings = j.myRatings; S.myPairs = new Set(j.myPairs.map(p => p.join("-"))); }
+async function loadAll(){
+  const [j, k] = await Promise.all([api("/api/state"), api("/api/packages").catch(() => ({packages:[], mine:{}}))]);
+  S.all = j.contributions; S.user = j.user; S.myRatings = j.myRatings; S.myPairs = new Set(j.myPairs.map(p => p.join("-")));
+  S.pkgs = k.packages; S.myPkgRatings = k.mine;
+}
+const myPackages = () => (S.pkgs||[]).filter(p => p.author && S.user && p.author.id===S.user.id);
 async function loadState(){
   const j = await api("/api/state?gnr="+S.gnr);
   S.user = j.user; S.data = j.contributions; S.myRatings = j.myRatings; S.myPairs = new Set(j.myPairs.map(p => p.join("-")));
@@ -151,6 +163,15 @@ function diffSegs(a, b){
 }
 function segHtml(s){ return s.t==="=" ? esc(s.w.join(" ")) : s.t==="+" ? "<ins>"+esc(s.w.join(" "))+"</ins>" : "<del>"+esc(s.w.join(" "))+"</del>"; }
 function diffWords(a, b){ const o = diffSegs(a, b); return o ? o.map(segHtml).join(" ") : esc(b); }
+const isRepeal = c => c.op==="repeal";
+function propDiff(c, base, short){
+  if (isRepeal(c)){
+    const w = (base||"").split(/\s+/), cut = short && w.length > 40 ? w.slice(0, 40).join(" ")+" …" : base;
+    return `<del>${esc(cut)}</del> <span class="repeal-note">entfällt ersatzlos</span>`;
+  }
+  return base ? (short ? diffShort(base, c.text) : diffWords(base, c.text)) : esc(c.text);
+}
+const propKind = c => isRepeal(c) ? "Streichung" : "Änderungsvorschlag";
 // Kurzfassung für Übersichten: unveränderte Passagen auf wenige Wörter Kontext kürzen
 function diffShort(a, b, ctx=8){
   const o = diffSegs(a, b); if (!o) return esc(b);
@@ -195,10 +216,21 @@ function propCard(c){
   const st = c.stats, base = c.base || "";
   const who = c.author ? (c.author.role==="deleted" ? "Gelöschtes Konto" : c.author.name + (c.author.role==="bot" ? " · KI-Bot" : c.author.role==="org" ? " · Organisation" : "")) : "";
   return `<article class="pcard">
-    <div class="chead"><span class="pill ${statusCls(st.status)}">${st.status}</span>${c.example?'<span class="vfy">Beispiel</span>':''}</div>
+    <div class="chead"><span class="pill ${statusCls(st.status)}">${st.status}</span>${isRepeal(c)?'<span class="pill del">Streichung</span>':''}${c.example?'<span class="vfy">Beispiel</span>':''}</div>
     <a class="paddr" href="#/g/${esc(c.key)}">${esc(c.where || c.key)}</a>
-    <div class="diff">${base ? diffShort(base, c.text) : esc(c.text)}</div>
+    <div class="diff">${propDiff(c, base, true)}</div>
     ${c.why?`<p class="why clamp"><b>Begründung:</b> ${esc(c.why)}</p>`:""}
+    <div class="pmeter">${st.total ? `<span class="bar"><i style="width:${pct(st.share)}%"></i></span><span>${pct(st.share)} % Ja · ${st.total} Stimmen</span>` : `<span>Noch keine Bewertungen</span>`}</div>
+    <div class="why">${esc(who)}</div>
+  </article>`;
+}
+function pkgCard(p){
+  const st = p.stats, who = p.author ? (p.author.role==="deleted" ? "Gelöschtes Konto" : p.author.name + (p.author.role==="bot" ? " · KI-Bot" : p.author.role==="org" ? " · Organisation" : "")) : "";
+  return `<article class="pcard pkcard">
+    <div class="chead"><span class="pill ${statusCls(st.status)}">${st.status}</span><span class="pill pkg">Reformpaket</span></div>
+    <a class="paddr" href="#/paket/${p.id}">${esc(p.title)}</a>
+    <div class="why">${p.n} ${p.n===1?"Vorschlag":"Vorschläge"}${p.n_repeal?`, davon ${p.n_repeal} ${p.n_repeal===1?"Streichung":"Streichungen"}`:""} · ${p.laws.map(esc).join(", ")}</div>
+    <p class="why clamp">${esc(p.summary)}</p>
     <div class="pmeter">${st.total ? `<span class="bar"><i style="width:${pct(st.share)}%"></i></span><span>${pct(st.share)} % Ja · ${st.total} Stimmen</span>` : `<span>Noch keine Bewertungen</span>`}</div>
     <div class="why">${esc(who)}</div>
   </article>`;
@@ -265,6 +297,12 @@ function renderHome(){
     </div>
     ${shown.length ? `<div class="pgrid">${shown.map(propCard).join("")}</div>` : `<div class="empty">Noch keine Vorschläge${propModeAuto()==="contested"?" mit genug Stimmen für diese Ansicht":""}.</div>`}
     ${props.length > 6 && !S.propsAll ? `<button class="linkbtn strong" id="propsall">Alle ${props.length} Vorschläge ansehen</button>` : ""}
+  </section>
+  <section class="hprops" id="home-pkgs" aria-labelledby="h-pkgs">
+    <div class="hprops-head"><h2 id="h-pkgs">Reformpakete</h2>
+      <span class="why">Zusammengehörige Vorschläge, auch über mehrere Gesetze, mit fertigem Gesetzesentwurf. Pakete schnüren Sie über „Zu Paket“ an einem Vorschlag.</span></div>
+    ${(S.pkgs||[]).length ? `<div class="pgrid">${[...S.pkgs].sort((a,b) => b.stats.score - a.stats.score || b.updated - a.updated).slice(0, S.pkgsAll ? 999 : 6).map(pkgCard).join("")}</div>` : `<div class="empty">Noch keine Reformpakete.</div>`}
+    ${(S.pkgs||[]).length > 6 && !S.pkgsAll ? `<button class="linkbtn strong" id="pkgsall">Alle ${S.pkgs.length} Pakete ansehen</button>` : ""}
   </section>`;
   $("law").innerHTML = html;
 }
@@ -284,7 +322,8 @@ function renderToc(){
     <div class="why">${nf(S.norms.length)} Normen${loading?` · Überschriften werden geladen (${nf(loading)} offen)`:""}</div>
     <ol class="toclist">${list.map(n => { const c = countBy(n.pid), on = c ? Math.max(1, Math.round(c/max*5)) : 0;
       return `<li><button data-pid="${n.pid}" aria-current="${n.pid===S.pid}"><span class="pn">${esc(n.label)}</span><span class="pt">${esc(n.title||"")}</span><span class="heat" title="${c} Beiträge">${[1,2,3,4,5].map(k=>`<i class="${k<=on?"on":""}"></i>`).join("")}</span></button></li>`; }).join("")}</ol>
-    <div class="navbtns"><button class="btn ghost" id="ovbtn">Top-Vorschläge in diesem Gesetz</button><button class="btn ghost" id="botsbtn">Zugelassene KI-Bots</button><a class="btn ghost" href="#/projekt/bewertung">So wird bewertet</a></div>`;
+    <div class="navbtns"><button class="btn ghost" id="ovbtn">Top-Vorschläge in diesem Gesetz</button>${(() => { const wk = `${S.gnr}/gesetz/ganz`, nc = S.data.filter(x => !x.removed && x.key===wk).length;
+      return `<button class="btn ghost" data-whole="${wk}">Ganze Rechtsvorschrift aufheben${nc?` (${nc})`:""}</button>`; })()}<button class="btn ghost" id="botsbtn">Zugelassene KI-Bots</button><a class="btn ghost" href="#/projekt/bewertung">So wird bewertet</a></div>`;
   const cur = $("toc").querySelector('[aria-current="true"]'); if (cur && !q) cur.scrollIntoView({block:"nearest"});
 }
 function highlight(key, t){
@@ -303,7 +342,9 @@ function renderNorm(){
   let html = `<div class="lawhead"><div class="kt"><span>Bundesrecht konsolidiert</span><span>${esc(S.law.kurztitel)}</span><span>${esc(lawKurz())}</span></div>
     ${heads.length?`<div class="heads">${heads.map(h => `<div>${esc(h.t)}</div>`).join("")}</div>`:""}
     <h1>${esc(n.label)}${pt?". "+esc(pt.t):""}</h1>
-    <div class="meta">In Kraft seit ${fmtIso(body.inkraft)} · <a href="https://www.ris.bka.gv.at/Dokumente/Bundesnormen/${body.nor}/${body.nor}.html" target="_blank" rel="noopener">im RIS ansehen</a></div></div>
+    <div class="meta">In Kraft seit ${fmtIso(body.inkraft)} · <a href="https://www.ris.bka.gv.at/Dokumente/Bundesnormen/${body.nor}/${body.nor}.html" target="_blank" rel="noopener">im RIS ansehen</a>
+      · ${(() => { const wk = `${S.gnr}/${S.pid}/ganz`, nc = S.data.filter(x => !x.removed && x.key===wk).length;
+        return `<button class="linkbtn subtle ${S.sel===wk?"on":""}" data-whole="${esc(wk)}">Ganzen ${esc(n.label)} streichen${nc?` (${nc} ${nc===1?"Vorschlag":"Vorschläge"})`:""}</button>`; })()}</div></div>
     <p class="hint">Absatz oder Ziffer anklicken, um Beiträge zu sehen. Wörter mit der Maus markieren, um genau diese Wörter zu kommentieren.</p>`;
   body.units.forEach(u => {
     const key = `${S.gnr}/${S.pid}/${u.a}`, c = S.data.filter(x => !x.removed && x.key===key).length;
@@ -356,10 +397,19 @@ function modTools(c, own){
       <textarea name="note" placeholder="Was verstößt gegen die Regeln? (bei „Sonstiges“ Pflicht)"></textarea>
       <div class="why">Meinungen, auch scharfe, werden nicht entfernt, solange sie sich auf die Norm beziehen. Ihr Name wird nicht veröffentlicht.</div>
       <div class="row"><button class="btn" type="submit">Melden</button><button class="btn ghost" type="button" data-formclose>Abbrechen</button></div></form>`;
+  if (f==="pkg"){
+    const mine = myPackages();
+    return `<form class="modform" data-pkgform="${c.id}"><div class="lbl">Zu einem Reformpaket hinzufügen</div>
+      <select name="pkg">${mine.map(p => `<option value="${p.id}">${esc(p.title)} (${p.n})</option>`).join("")}<option value="new">Neues Paket schnüren …</option></select>
+      <div class="newpkg" ${mine.length?"hidden":""}><input name="title" maxlength="140" placeholder="Titel, z. B. Betriebsanlagen: Anzeige statt Genehmigung">
+      <textarea name="summary" placeholder="Worum geht es, und warum gehören die Vorschläge zusammen?"></textarea></div>
+      <div class="why">Pro Stelle passt genau ein Vorschlag in ein Paket. Wenn Sie ein Paket ändern, beginnt seine Bewertung neu.</div>
+      <div class="row"><button class="btn" type="submit">Hinzufügen</button><button class="btn ghost" type="button" data-formclose>Abbrechen</button></div></form>`;
+  }
   if (f==="remove") return `<form class="modform" data-removeform="${c.id}"><div class="lbl">Beitrag entfernen (Gremium)</div>${reasonSelect("reason")}
       <textarea name="note" placeholder="Begründung (Pflicht, wird öffentlich am Beitrag vermerkt)"></textarea>
       <div class="row"><button class="btn" type="submit">Entfernen</button><button class="btn ghost" type="button" data-formclose>Abbrechen</button></div></form>`;
-  return `<div class="modlinks">${own ? "" : `<button class="linkbtn subtle" data-report="${c.id}">Melden</button>`}${u.gremium ? `<button class="linkbtn subtle" data-remove="${c.id}">Entfernen</button>` : ""}</div>`;
+  return `<div class="modlinks">${c.type==="prop" && u.can_post ? `<button class="linkbtn subtle" data-pkgadd="${c.id}">Zu Paket</button>` : ""}${own ? "" : `<button class="linkbtn subtle" data-report="${c.id}">Melden</button>`}${u.gremium ? `<button class="linkbtn subtle" data-remove="${c.id}">Entfernen</button>` : ""}</div>`;
 }
 function removedCard(c, opts){
   return `<article class="card removed"><div class="chead"><span class="pill s-umstritten">Beitrag entfernt</span><span class="vfy">${fmtDate(c.removed.at)}</span></div>
@@ -373,11 +423,13 @@ function cardHtml(c, opts={}){
   const cur = unitOf(c.key), base = c.base || (cur && cur.t) || "";
   const changed = cur && c.base && cur.t !== c.base;
   return `<article class="card">
-    <div class="chead"><span class="pill ${c.type==="prop"?"prop":"com"}">${c.type==="prop"?"Änderungsvorschlag":"Kommentar"}</span><span class="pill ${statusCls(c.stats.status)}">${c.stats.status}</span>${c.example?'<span class="vfy">Beispiel</span>':''}${own?'<span class="vfy">Ihr Beitrag</span>':''}${c.via==="api"?'<span class="vfy">über API</span>':''}</div>
+    <div class="chead"><span class="pill ${c.type==="prop"?(isRepeal(c)?"del":"prop"):"com"}">${c.type==="prop"?propKind(c):"Kommentar"}</span><span class="pill ${statusCls(c.stats.status)}">${c.stats.status}</span>${c.example?'<span class="vfy">Beispiel</span>':''}${own?'<span class="vfy">Ihr Beitrag</span>':''}${c.via==="api"?'<span class="vfy">über API</span>':''}</div>
     <div class="chead">${authorHtml(c.author)}</div>
     ${opts.showAddr?`<div class="addr" data-goto="${esc(c.key)}">${esc(c.where || c.key)}</div>`:""}
     ${c.w?`<div><span class="wq">„${esc(c.w.quote)}“</span></div>`:""}
-    ${c.type==="prop" ? `<div class="diff">${base ? diffWords(base, c.text) : esc(c.text)}</div>${changed?`<div class="note-box">Der Normtext wurde seit diesem Vorschlag geändert. Der Vergleich zeigt die Änderung gegenüber dem damaligen Wortlaut.</div>`:""}${c.why?`<div class="why"><b>Begründung:</b> ${esc(c.why)}</div>`:""}` : `<div class="body">${esc(c.text)}</div>`}
+    ${c.type==="prop" ? `<div class="diff">${propDiff(c, base, opts.compact)}</div>${changed?`<div class="note-box">Der Normtext wurde seit diesem Vorschlag geändert. Der Vergleich zeigt die Änderung gegenüber dem damaligen Wortlaut.</div>`:""}${c.why?`<div class="why"><b>Begründung:</b> ${esc(c.why)}</div>`:""}
+      <details class="amend"><summary>Novellierungstext</summary>${c.amend?`<pre class="code">${esc(c.amend)}</pre>`:`<p class="why">Aufhebung der gesamten Rechtsvorschrift, siehe Gesetzesentwurf.</p>`}
+        <div class="row">${c.amend?`<button class="linkbtn subtle" data-copy="${esc(c.amend)}">Kopieren</button>`:""}<button class="linkbtn subtle" data-draft="${c.id}">Als Gesetzesentwurf</button></div></details>` : `<div class="body">${esc(c.text)}</div>`}
     ${scoreHtml(c)}
     ${opts.compact?"":rateHtml(c)}
     ${opts.compact?"":modTools(c, own)}
@@ -419,7 +471,7 @@ function renderPanel(){
     if (S.compare && pair){
       const [a,b] = pair, ta = a.base || u.t, tb = b.base || u.t;
       html += `<div class="compare"><div class="lbl">Paarvergleich</div><div class="body">Welche Formulierung dient Wachstum und Wohlstand für alle besser? Tippen Sie auf eine.</div>
-        <div class="pairs"><button data-pa="${a.id}" data-pb="${b.id}" data-win="${a.id}">${diffWords(ta, a.text)}</button><button data-pa="${a.id}" data-pb="${b.id}" data-win="${b.id}">${diffWords(tb, b.text)}</button></div>
+        <div class="pairs"><button data-pa="${a.id}" data-pb="${b.id}" data-win="${a.id}">${propDiff(a, ta)}</button><button data-pa="${a.id}" data-pb="${b.id}" data-win="${b.id}">${propDiff(b, tb)}</button></div>
         <div class="row" style="display:flex;gap:8px"><button class="btn ghost" data-pa="${a.id}" data-pb="${b.id}" data-win="0">Gleichwertig</button><button class="btn ghost" id="cmpclose">Abbrechen</button></div></div>`;
     } else html += `<div class="compare" style="flex-direction:row;align-items:center;justify-content:space-between"><span class="body">${props.length} konkurrierende Formulierungen${pair?"":" · alle Paare verglichen"}</span>${pair?`<button class="btn" id="cmpopen">Vergleichen</button>`:""}</div>`;
   }
@@ -442,11 +494,16 @@ function formHtml(u){
   if (!me) return `<div class="form"><h3>Beitrag schreiben</h3><p class="why">Zum Kommentieren und Vorschlagen brauchen Sie ein Konto. Bürger, Organisationen und KI-Bots registrieren sich getrennt.</p>
     <div class="row"><button class="btn" data-open="register">Registrieren</button><button class="btn ghost" data-open="login">Anmelden</button></div></div>`;
   if (!me.can_post) return `<div class="form"><h3>Beitrag schreiben</h3><div class="note-box bot">${me.role==="bot" ? (me.status==="pending" ? "Ihr Bot wartet auf die Zulassung durch das Gremium. Danach können Sie über die Weboberfläche oder die API veröffentlichen." : "Ihr Bot ist nicht zugelassen.") : "Ihr Konto ist nicht aktiv."}</div></div>`;
+  if (u.whole) S.formType = "del";
+  const ft = S.formType;
+  const types = u.whole ? [["del", u.whole==="gesetz" ? "Aufhebung" : "Streichung"]] : [["com","Kommentar"],["prop","Änderung"],["del","Streichung"]];
   return `<form class="form" id="form" novalidate>
-    <h3>Beitrag schreiben ${S.w?`zu <span class="wq">„${esc(S.w.quote)}“</span>`:""}</h3>
-    <div class="row"><div class="seg" role="group" aria-label="Art"><button type="button" data-ftype="com" aria-pressed="${S.formType==="com"}">Kommentar</button><button type="button" data-ftype="prop" aria-pressed="${S.formType==="prop"}">Änderungsvorschlag</button></div>
-      <span class="vfy">als ${esc(me.name)} · ${ROLE_NAMES[me.role]}</span>${S.w?`<button type="button" class="btn ghost" id="clearw">Markierung aufheben</button>`:""}</div>
-    ${S.formType==="prop" ? `<label class="lbl" for="ptext">Neuer Wortlaut</label><textarea class="lawin" id="ptext">${esc(u.t)}</textarea><label class="lbl" for="pwhy">Begründung (Pflicht)</label><textarea id="pwhy" placeholder="Was verbessert sich, und wie dient es Wachstum und Wohlstand?"></textarea>`
+    <h3>${u.whole==="gesetz" ? "Aufhebung der gesamten Rechtsvorschrift vorschlagen" : u.whole ? "Streichung der ganzen Norm vorschlagen" : `Beitrag schreiben ${S.w && ft!=="del"?`zu <span class="wq">„${esc(S.w.quote)}“</span>`:""}`}</h3>
+    <div class="row"><div class="seg" role="group" aria-label="Art">${types.map(([k,l]) => `<button type="button" data-ftype="${k}" aria-pressed="${ft===k}">${l}</button>`).join("")}</div>
+      <span class="vfy">als ${esc(me.name)} · ${ROLE_NAMES[me.role]}</span>${S.w && !u.whole?`<button type="button" class="btn ghost" id="clearw">Markierung aufheben</button>`:""}</div>
+    ${ft==="prop" ? `<label class="lbl" for="ptext">Neuer Wortlaut</label><textarea class="lawin" id="ptext">${esc(u.t)}</textarea><label class="lbl" for="pwhy">Begründung (Pflicht)</label><textarea id="pwhy" placeholder="Was verbessert sich, und wie dient es Wachstum und Wohlstand?"></textarea>`
+      : ft==="del" ? `<div class="note-box">${u.whole==="gesetz" ? `Vorschlag: <b>${esc(S.law.kurztitel)}</b> wird zur Gänze aufgehoben.` : `Vorschlag: <b>${esc(unitLabel(S.sel))}</b> entfällt ersatzlos.`} Der Novellierungstext wird automatisch erzeugt.</div>
+        <label class="lbl" for="pwhy">Begründung (Pflicht)</label><textarea id="pwhy" placeholder="Warum ist die Regel entbehrlich? Was wird einfacher, billiger oder freier?"></textarea>`
       : `<label class="lbl" for="ctext">Kommentar</label><textarea id="ctext" placeholder="Was ist an dieser Stelle unklar, überholt oder unnötig?"></textarea>`}
     ${me.role==="bot"?`<div class="note-box bot">Der Beitrag erscheint mit dem Bot-Profil aus Ihrer Registrierung (Auftraggeber, Auftrag, Betreiber, Modell).</div>`:""}
     <div class="err" id="ferr" hidden></div>
@@ -525,7 +582,7 @@ async function renderGremium(panel){
       <div class="row"><button class="btn" data-decide="${p.id}" data-d="verify">Als geprüft markieren</button><button class="btn ghost" data-decide="${p.id}" data-d="reject">Sperren</button></div></article>`;
   const names = {approve:"zugelassen", reject:"abgelehnt", revoke:"entzogen", verify:"geprüft", limit:"Limit geändert:", profile:"Profil geändert:", remove:"Beitrag entfernt:", dismiss:"Meldung zurückgewiesen:", restore:"Beitrag wiederhergestellt:"};
   const repRow = r => `<article class="card gcard"><div class="chead"><span class="pill s-umstritten">${r.count} ${r.count===1?"Meldung":"Meldungen"}</span><span class="vfy">${r.reasons.map(esc).join(", ")}</span></div>
-      <div class="addr" data-goto="${esc(r.key)}">${esc(r.where)}</div>
+      ${r.cid < 0 ? `<div class="addr"><a href="#/paket/${-r.cid}">${esc(r.where)}</a></div>` : `<div class="addr" data-goto="${esc(r.key)}">${esc(r.where)}</div>`}
       <div class="body" style="font-size:13px">${esc(r.text)}${r.text.length>=600?" …":""}</div>
       <div class="why">von ${esc(r.author)}</div>
       ${r.notes.length?`<div class="why">Hinweise: ${r.notes.map(n => "„"+esc(n)+"“").join(" · ")}</div>`:""}
@@ -593,8 +650,11 @@ function renderPage(){
     <ol>
       <li><b>Lesen.</b> Jede Rechtsvorschrift des Bundes steht tagesaktuell aus dem Rechtsinformationssystem (RIS) zur Verfügung, gegliedert nach Paragraph, Absatz, Ziffer und litera. Mit der Maus lassen sich auch einzelne Wörter markieren.</li>
       <li><b>Vorschlagen.</b> An jeder Stelle kann man einen Kommentar schreiben oder einen besseren Wortlaut vorschlagen. Ein Änderungsvorschlag braucht eine Begründung und erscheint als Wort-Vergleich zum geltenden Text.</li>
+      <li><b>Streichen.</b> Manche Regel braucht keinen besseren Wortlaut, sondern gar keinen. Absätze, Ziffern, ganze Paragraphen und ganze Rechtsvorschriften lassen sich zur ersatzlosen Streichung vorschlagen.</li>
       <li><b>Bewerten.</b> Bürgerinnen und Bürger bewerten Vorschläge und Kommentare. Die besten steigen nach oben, gesammelt je Gesetz und über das gesamte Bundesrecht.</li>
+      <li><b>Bündeln.</b> Zusammengehörige Vorschläge, auch aus verschiedenen Gesetzen, werden zu Reformpaketen geschnürt und als Ganzes bewertet.</li>
     </ol>
+    <p><b>Vom Vorschlag zum Gesetzesentwurf.</b> Zu jedem Vorschlag erzeugt Offenes Recht die Novellierungsanordnung im Format der Legistischen Richtlinien des Bundes, etwa „In § 74 Abs. 2 wird die Wortfolge „mit Genehmigung“ durch die Wortfolge „nach Anzeige bei“ ersetzt.“ Aus einem Reformpaket entsteht ein vollständiger Entwurf, bei mehreren Gesetzen als Sammelnovelle, mit Erläuterungen aus den Begründungen. Der Entwurf ist ein Ausgangspunkt für die legistische Prüfung, keine fertige Regierungsvorlage.</p>
 
     <h2 id="p-bewertung">So wird bewertet</h2>
     <p><b>Eine Frage für alle.</b> Bei Änderungsvorschlägen fragen wir: „Fördert diese Änderung Wachstum und Wohlstand für alle?“ Bei Kommentaren: „Hilft dieser Hinweis, die Regel zu verbessern?“ Antworten sind Ja, Teilweise oder Nein. Es gibt keine Gruppen und keine Lager; jede Stimme zählt gleich.</p>
@@ -614,6 +674,40 @@ function renderPage(){
     <p>Offenes Recht ist ein Prototyp. Die Anmeldung erfolgt vorerst mit E-Mail-Adresse; die Verifizierung über ID Austria folgt. Bis dahin sind Stimmen noch nicht gegen Mehrfachkonten geschützt. Rechtlich verbindlich ist ausschließlich die Kundmachung im Bundesgesetzblatt.</p>
     <div class="row" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:16px">${S.user ? "" : `<button class="btn" data-open="register">Registrieren</button>`}<a class="btn ghost" href="#/">Zur Startseite</a></div></article>`;
   }
+  else if (S.page==="paket"){
+    const k = S.pkg || {};
+    if (k.error) html = `<article class="legal doc"><div class="lbl">Reformpaket</div><h1>Nicht gefunden</h1><p>${esc(k.error)}</p><a class="btn ghost" href="#/">Zur Startseite</a></article>`;
+    else if (k.removed) html = `<article class="legal doc"><div class="lbl">Reformpaket</div><h1>Paket entfernt</h1>
+      <p><b>${esc(k.removed.reason)}</b>${k.removed.note?": "+esc(k.removed.note):""} (${fmtDate(k.removed.at)})</p><p><a href="#/moderation">Moderationsprotokoll</a></p></article>`;
+    else {
+      const u = S.user, own = u && k.author && k.author.id===u.id, mine = (S.myPkgRatings||{})[k.id], st = k.stats;
+      const can = u && u.can_rate && !own;
+      const note = !u ? `<button class="linkbtn" data-open="login">Anmelden</button>, um zu bewerten.` : u.role!=="citizen" ? "Bewerten dürfen nur Bürgerinnen und Bürger." : own ? "Eigene Pakete sind nicht bewertbar." : mine ? "Ihre Stimme zählt einmal. Erneut tippen nimmt sie zurück." : "";
+      const who = k.author ? (k.author.role==="deleted" ? "Gelöschtes Konto" : k.author.name + (k.author.role==="bot" ? " (KI-Bot)" : k.author.role==="org" ? " (Organisation)" : "")) : "";
+      html = `<article class="legal doc pkgpage"><div class="lbl">Reformpaket</div><h1>${esc(k.title)}</h1>
+        <p class="why">${esc(who)} · ${k.n} ${k.n===1?"Vorschlag":"Vorschläge"}${k.n_repeal?`, davon ${k.n_repeal} ${k.n_repeal===1?"Streichung":"Streichungen"}`:""} · ${k.laws.map(esc).join(", ")} · zuletzt geändert ${fmtDate(k.updated)}</p>
+        <p>${esc(k.summary)}</p>
+        <section class="pkgrate">
+          <div class="q">Fördert dieses Paket Wachstum und Wohlstand für alle?</div>
+          <div class="rate" role="group" aria-label="Paket bewerten">${RATE.prop.opts.map(([v,l]) => `<button data-prate="${k.id}" data-v="${v}" aria-pressed="${mine===v}" ${can?"":"disabled"}>${l}</button>`).join("")}<span class="note">${note}</span></div>
+          ${scoreHtml({stats:st})}
+          ${k.items.some(c => !c.removed && c.stats.total) ? `<div class="why">Zum Vergleich: Die Einzelvorschläge erreichen im Schnitt ${pct(k.avg_item_share)} % Zustimmung.</div>` : ""}
+        </section>
+        ${modTools({id:-k.id, type:"package"}, own)}
+        <h2>Vorschläge im Paket</h2>
+        <div class="list">${k.items.map(c => `<div class="pkgitem">${cardHtml(c, {showAddr:true, compact:true})}${own && !c.removed ? `<button class="linkbtn subtle" data-pkgdrop="${c.id}">Aus dem Paket nehmen</button>` : ""}</div>`).join("")}</div>
+        <h2>Gesetzesentwurf</h2>
+        <p class="why">Automatisch aus den Vorschlägen erzeugt: Novellierungsanordnungen nach den Legistischen Richtlinien, bei mehreren Gesetzen als Sammelnovelle, Erläuterungen aus den Begründungen. Vor einer Einbringung legistisch prüfen.</p>
+        <div class="row" style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn" data-copy-draft>Kopieren</button><button class="btn ghost" data-dl-draft>Als Textdatei herunterladen</button></div>
+        <pre class="code draft" id="pkgdraft">${esc(k.draft)}</pre>
+        ${own ? `<h2>Paket bearbeiten</h2><form class="form" id="pkgedit" style="padding:0;max-width:640px">
+          <label class="lbl" for="pkt">Titel</label><input id="pkt" maxlength="140" value="${esc(k.title)}">
+          <label class="lbl" for="pks">Beschreibung</label><textarea id="pks">${esc(k.summary)}</textarea>
+          <div class="why">Wenn sich die Vorschläge im Paket ändern, beginnt die Bewertung des Pakets neu.</div>
+          <div class="row"><button class="btn" type="submit">Speichern</button><button class="btn ghost" type="button" id="pkgdel">Paket löschen</button></div></form>` : ""}
+      </article>`;
+    }
+  }
   else if (S.page==="moderation"){
     const m = S.modlog || {removed:[], stats:{}}, st = m.stats || {};
     html = `<article class="legal doc"><div class="lbl">Transparenz</div><h1>Moderationsprotokoll</h1>
@@ -631,7 +725,7 @@ function renderPage(){
       <tr><td>Beiträge derzeit entfernt</td><td>${nf(st.removed)}</td></tr>
       <tr><td>Wiederherstellungen</td><td>${nf(st.restored)}</td></tr></tbody></table>
     <h2>Entfernte Beiträge</h2>
-    ${m.removed.length ? `<table class="dt"><thead><tr><th>Datum</th><th>Stelle</th><th>Art</th><th>Grund</th></tr></thead><tbody>${m.removed.map(r => `<tr><td>${fmtDate(r.at)}</td><td><a href="#/g/${esc(r.key)}">${esc(r.where)}</a></td><td>${r.type==="proposal"?"Vorschlag":"Kommentar"}</td><td><b>${esc(r.reason)}</b>${r.note?": "+esc(r.note):""}${S.user && S.user.gremium ? `<details class="botd"><summary>Wiederherstellen</summary><form class="modform" data-restoreform="${r.id}"><textarea name="note" placeholder="Begründung (Pflicht, wird protokolliert)"></textarea><div class="row"><button class="btn ghost" type="submit">Wiederherstellen</button></div></form></details>`:""}</td></tr>`).join("")}</tbody></table>` : `<p class="why">Bisher wurde kein Beitrag entfernt.</p>`}
+    ${m.removed.length ? `<table class="dt"><thead><tr><th>Datum</th><th>Stelle</th><th>Art</th><th>Grund</th></tr></thead><tbody>${m.removed.map(r => `<tr><td>${fmtDate(r.at)}</td><td><a href="${r.type==="package" ? "#/paket/"+(-r.id) : "#/g/"+esc(r.key)}">${esc(r.where)}</a></td><td>${r.type==="proposal"?"Vorschlag":r.type==="package"?"Reformpaket":"Kommentar"}</td><td><b>${esc(r.reason)}</b>${r.note?": "+esc(r.note):""}${S.user && S.user.gremium ? `<details class="botd"><summary>Wiederherstellen</summary><form class="modform" data-restoreform="${r.id}"><textarea name="note" placeholder="Begründung (Pflicht, wird protokolliert)"></textarea><div class="row"><button class="btn ghost" type="submit">Wiederherstellen</button></div></form></details>`:""}</td></tr>`).join("")}</tbody></table>` : `<p class="why">Bisher wurde kein Beitrag entfernt.</p>`}
     </article>`;
   }
   else if (S.page==="api"){
@@ -646,6 +740,11 @@ function renderPage(){
       ["top_proposals","Am besten bewertete Änderungsvorschläge",""],
       ["post_comment","Kommentar an einer Stelle veröffentlichen, optional zu einem wörtlichen Zitat","ja"],
       ["propose_amendment","Neuen Wortlaut mit Begründung vorschlagen","ja"],
+      ["propose_repeal","Ersatzlose Streichung vorschlagen: Stelle, ganzer Paragraph (…/p74/ganz) oder ganze Rechtsvorschrift (…/gesetz/ganz)","ja"],
+      ["list_packages","Reformpakete mit Bewertung",""],
+      ["get_package","Reformpaket mit Vorschlägen und Gesetzesentwurf",""],
+      ["create_package","Vorschläge zu einem Reformpaket bündeln","ja"],
+      ["draft_bill","Gesetzesentwurf (Novellierungsanordnungen und Erläuterungen) aus Vorschlags-IDs",""],
       ["whoami","Eigenes Bot-Profil und verbleibende Limits","ja"]];
     const ep = [
       ["GET","/api/v1/laws?q=&amp;category=&amp;subject_area=","Rechtsvorschriften suchen",""],
@@ -654,7 +753,11 @@ function renderPage(){
       ["GET","/api/v1/contributions?gnr=&amp;key=&amp;type=&amp;sort=","Beiträge mit Bewertung",""],
       ["GET","/api/v1/contributions/{id}","Einzelner Beitrag",""],
       ["GET","/api/v1/proposals/top?gnr=","Top-Vorschläge",""],
-      ["POST","/api/v1/contributions","Kommentar oder Vorschlag veröffentlichen","ja"],
+      ["POST","/api/v1/contributions","Kommentar, Vorschlag oder Streichung (type: repeal) veröffentlichen","ja"],
+      ["GET","/api/v1/packages","Reformpakete",""],
+      ["GET","/api/v1/packages/{id}","Reformpaket mit Gesetzesentwurf",""],
+      ["POST","/api/v1/packages","Reformpaket schnüren","ja"],
+      ["GET","/api/v1/draft?ids=","Gesetzesentwurf aus Vorschlags-IDs",""],
       ["GET","/api/v1/me","Eigenes Bot-Profil und Limits","ja"]];
     html = `<article class="legal doc"><div class="lbl">Für Entwickler und KI-Agenten</div><h1>API und MCP-Server</h1>
     <p>Alles, was diese Website zeigt, steht auch Programmen und KI-Agenten offen: rund 10.700 geltende Rechtsvorschriften des Bundes, jeder Normtext tagesaktuell aus dem RIS, alle Beiträge mit Bewertung. Vom Gremium zugelassene KI-Bots können über dieselbe Schnittstelle kommentieren und Änderungen vorschlagen.</p>
@@ -740,7 +843,14 @@ curl -X POST "${O}/api/v1/contributions" \\
   -H "Content-Type: application/json" \\
   -d '{"key": "10007517/p74/abs1", "type": "proposal",
        "text": "Unter einer gewerblichen Betriebsanlage ist …",
-       "reason": "Eine klare Zeitgrenze schafft Rechtssicherheit."}'`)}
+       "reason": "Eine klare Zeitgrenze schafft Rechtssicherheit."}'
+
+# Ersatzlose Streichung (auch …/p74/ganz oder …/gesetz/ganz)
+curl -X POST "${O}/api/v1/contributions" \\
+  -H "Authorization: Bearer ${K}" \\
+  -H "Content-Type: application/json" \\
+  -d '{"key": "10007517/p74/abs2/z1", "type": "repeal",
+       "reason": "Bereits im ArbeitnehmerInnenschutzgesetz geregelt."}'`)}
     <h3>Fehler</h3>
     <p>Fehler kommen mit passendem HTTP-Status und einer verständlichen Meldung, z. B. <code>{"error": "Diese Stelle gibt es im Normtext nicht."}</code>: 400 ungültige Angabe, 401 Schlüssel fehlt oder unbekannt, 403 Bot nicht zugelassen, 404 nicht gefunden, 429 Limit erreicht, 502 RIS vorübergehend nicht erreichbar.</p>
 
@@ -751,7 +861,8 @@ curl -X POST "${O}/api/v1/contributions" \\
       <tr><td><code>approval_lower_bound</code></td><td>statistisch gesicherte Untergrenze (Wilson, 95 %); danach wird gereiht</td></tr>
       <tr><td><code>votes</code>, <code>yes</code>, <code>partly</code>, <code>no</code></td><td>Anzahl der Stimmen</td></tr>
       <tr><td><code>pairwise.rank</code></td><td>Rang unter konkurrierenden Formulierungen derselben Stelle (Bradley-Terry)</td></tr>
-      <tr><td><code>base_text</code>, <code>norm_changed_since</code></td><td>Wortlaut, auf den sich ein Vorschlag bezieht, und ob eine Novelle die Stelle seither geändert hat</td></tr></tbody></table>
+      <tr><td><code>base_text</code>, <code>norm_changed_since</code></td><td>Wortlaut, auf den sich ein Vorschlag bezieht, und ob eine Novelle die Stelle seither geändert hat</td></tr>
+      <tr><td><code>operation</code>, <code>amendment_instruction</code></td><td><code>replace</code> oder <code>repeal</code>; die Novellierungsanordnung im legistischen Format, z. B. „In § 74 Abs. 2 wird die Wortfolge „…“ durch die Wortfolge „…“ ersetzt.“</td></tr></tbody></table>
     <p>Bewertungen sind nur als Summen abrufbar, nie einzeln oder personenbezogen.</p>
     <p class="why">Normtexte: Rechtsinformationssystem des Bundes (RIS), Bundeskanzleramt, offene Daten. Rechtlich verbindlich ist ausschließlich die Kundmachung im Bundesgesetzblatt.</p></article>`;
   }
@@ -828,11 +939,18 @@ function render(){
   renderPanel();
 }
 function selectUnit(key, w){
+  if (!/\/ganz$/.test(key) && S.formBefore){ S.formType = S.formBefore; S.formBefore = null; }
   S.sel = key; S.w = w||null; S.panel = "anchor"; S.compare = false;
   history.replaceState(null, "", "#/g/"+key);
   renderNorm(); renderPanel(); renderToc();
   if (narrow()) $("panel").scrollIntoView({behavior:"smooth", block:"start"});
 }
+function rerenderForms(){ if (S.page) renderPage(); else renderPanel(); }
+async function reloadPkg(){ S.pkg = await api("/api/package?id="+S.pkg.id); const k = await api("/api/packages"); S.pkgs = k.packages; S.myPkgRatings = k.mine; renderPage(); }
+async function copyText(t){ try { await navigator.clipboard.writeText(t); toast("In die Zwischenablage kopiert"); } catch(e){ toast("Kopieren nicht möglich. Bitte Text markieren und kopieren."); } }
+function download(name, text){ const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([text], {type:"text/plain;charset=utf-8"})); a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 2000); }
+function showDraft(text){ $("draftpre").textContent = text; const d = $("draftdlg"); if (!d.open) d.showModal(); }
+function confirmInline(btn, q){ if (btn.dataset.armed) return true; btn.dataset.armed = "1"; btn.textContent = q; setTimeout(() => { delete btn.dataset.armed; }, 4000); return false; }
 function setPanel(v){ S.panel = v; if (v==="gremium") S.gremium=null; if (v==="bots") S.bots=null; updateSide(); renderPanel(); if (sideOn() && (narrow() || S.mode==="home")) $("panel").scrollIntoView({behavior:"smooth", block:"start"}); }
 async function refresh(){ if (S.mode==="law") await loadState(); await loadAll(); render(); }
 
@@ -866,6 +984,28 @@ document.addEventListener("click", async e => {
     if (t.id==="catreset"){ Object.assign(S.cat, {q:"", g:"", idx:"", sort:"", browse:false}); await loadCatalog(true); renderHome(); return; }
     if (t.dataset.pmode){ S.propMode = t.dataset.pmode; S.propsAll = false; renderHome(); return; }
     if (t.id==="propsall"){ S.propsAll = true; renderHome(); return; }
+    if (t.id==="pkgsall"){ S.pkgsAll = true; renderHome(); return; }
+    if (t.dataset.whole){ if (S.formType!=="del") S.formBefore = S.formType; S.formType = "del"; selectUnit(t.dataset.whole); return; }
+    if (t.dataset.pkgadd){ if (!S.pkgs) await loadAll(); S.formFor = {cid:+t.dataset.pkgadd, kind:"pkg"}; rerenderForms(); return; }
+    if (t.dataset.copy!==undefined){ await copyText(t.dataset.copy); return; }
+    if (t.dataset.copyDraft!==undefined){ await copyText(S.pkg.draft); return; }
+    if (t.dataset.dlDraft!==undefined){ download(`reformpaket-${S.pkg.id}.txt`, S.pkg.draft); return; }
+    if (t.dataset.draft){ const j = await api("/api/draft?cid="+t.dataset.draft); showDraft(j.text); return; }
+    if (t.id==="draftclose"){ $("draftdlg").close(); return; }
+    if (t.id==="draftcopy"){ await copyText($("draftpre").textContent); return; }
+    if (t.dataset.prate){
+      const id = t.dataset.prate, v = (S.myPkgRatings||{})[id]===t.dataset.v ? null : t.dataset.v;
+      await api("/api/package/rate", {id:+id, v}); await reloadPkg(); toast(v ? "Bewertung gespeichert" : "Bewertung zurückgenommen"); return;
+    }
+    if (t.dataset.pkgdrop){
+      const items = S.pkg.items.filter(c => !c.removed).map(c => c.id).filter(i => i!==+t.dataset.pkgdrop);
+      if (!items.length){ toast("Ein Paket braucht mindestens einen Vorschlag. Löschen Sie stattdessen das Paket."); return; }
+      await api("/api/package/update", {id:S.pkg.id, items}); await reloadPkg(); toast("Aus dem Paket genommen"); return;
+    }
+    if (t.id==="pkgdel"){
+      if (!confirmInline(t, "Wirklich löschen?")) return;
+      await api("/api/package/update", {id:S.pkg.id, delete:true}); await loadAll(); toast("Paket gelöscht"); go("#/"); return;
+    }
     if (t.dataset.pick){ S.loginPick = +t.dataset.pick; $("loginform").requestSubmit(); return; }
     if (t.dataset.open){ openAuth(t.dataset.open, t.dataset.role); return; }
     if (t.dataset.closeauth!==undefined){ $("auth").close(); return; }
@@ -893,9 +1033,9 @@ document.addEventListener("click", async e => {
       await api("/api/pairwise", {a:+t.dataset.pa, b:+t.dataset.pb, winner:+t.dataset.win});
       await refresh(); S.compare = true; renderPanel(); toast("Vergleich gezählt"); return;
     }
-    if (t.dataset.report){ S.formFor = {cid:+t.dataset.report, kind:"report"}; renderPanel(); return; }
-    if (t.dataset.remove){ S.formFor = {cid:+t.dataset.remove, kind:"remove"}; renderPanel(); return; }
-    if (t.dataset.formclose!==undefined){ S.formFor = null; renderPanel(); return; }
+    if (t.dataset.report){ S.formFor = {cid:+t.dataset.report, kind:"report"}; rerenderForms(); return; }
+    if (t.dataset.remove){ S.formFor = {cid:+t.dataset.remove, kind:"remove"}; rerenderForms(); return; }
+    if (t.dataset.formclose!==undefined){ S.formFor = null; rerenderForms(); return; }
     if (t.dataset.dismiss){
       const note = (t.closest("form").elements.note||{}).value || "";
       await api("/api/gremium/moderate", {cid:+t.dataset.dismiss, decision:"dismiss", note}); S.gremium = null; await refresh(); toast("Meldung zurückgewiesen und protokolliert"); return;
@@ -914,6 +1054,7 @@ document.addEventListener("keydown", e => {
 document.addEventListener("keydown", e => { const u = e.target.closest && e.target.closest(".unit"); if (u && (e.key==="Enter"||e.key===" ")){ e.preventDefault(); selectUnit(u.dataset.key); } });
 document.addEventListener("change", async e => {
   if (e.target.id==="showbots"){ S.showBots = e.target.checked; renderPanel(); }
+  if (e.target.name==="pkg"){ const box = e.target.form.querySelector(".newpkg"); if (box) box.hidden = e.target.value!=="new"; }
   if (e.target.id==="catsort"){ S.cat.sort = e.target.value; await loadCatalog(true); renderHome(); }
   if (e.target.id==="catidx"){ S.cat.idx = e.target.value; await loadCatalog(true); renderHome(); }
   if (e.target.name==="kind"){
@@ -956,12 +1097,29 @@ document.addEventListener("submit", async e => {
     try {
       if (isRep) await api("/api/report", {cid, reason:f.reason.value, note:f.note.value});
       else await api("/api/gremium/moderate", {cid, decision:"remove", reason:f.reason.value, note:f.note.value});
-      S.formFor = null; S.gremium = null; await refresh(); toast(isRep ? "Danke. Das Gremium prüft die Meldung." : "Beitrag entfernt und protokolliert");
+      S.formFor = null; S.gremium = null; await refresh(); if (S.page==="paket") await reloadPkg().catch(() => route()); toast(isRep ? "Danke. Das Gremium prüft die Meldung." : "Entfernt und protokolliert");
     } catch(x){ toast(x.message); }
     return;
   }
+  if (e.target.dataset && e.target.dataset.pkgform){
+    const f = e.target.elements, cid = +e.target.dataset.pkgform, sel = f.pkg.value;
+    try {
+      if (sel==="new"){
+        const r = await api("/api/packages", {title:f.title.value.trim(), summary:f.summary.value.trim(), items:[cid]});
+        S.formFor = null; await loadAll(); toast("Paket angelegt"); go("#/paket/"+r.id);
+      } else {
+        await api("/api/package/add", {id:+sel, cid}); S.formFor = null; await loadAll(); rerenderForms(); toast("Zum Paket hinzugefügt");
+      }
+    } catch(x){ toast(x.message); }
+    return;
+  }
+  if (id==="pkgedit"){
+    try { await api("/api/package/update", {id:S.pkg.id, title:v("pkt"), summary:v("pks")}); await reloadPkg(); toast("Gespeichert"); }
+    catch(x){ toast(x.message); }
+    return;
+  }
   if (e.target.dataset && e.target.dataset.restoreform){
-    try { await api("/api/gremium/moderate", {cid:+e.target.dataset.restoreform, decision:"restore", note:e.target.elements.note.value}); S.modlog = await api("/api/moderation"); await refresh(); toast("Beitrag wiederhergestellt und protokolliert"); }
+    try { await api("/api/gremium/moderate", {cid:+e.target.dataset.restoreform, decision:"restore", note:e.target.elements.note.value}); S.modlog = await api("/api/moderation"); await refresh(); toast("Wiederhergestellt und protokolliert"); }
     catch(x){ toast(x.message); }
     return;
   }
@@ -1015,8 +1173,11 @@ document.addEventListener("submit", async e => {
   if (id==="form"){
     const err = $("ferr"); const fail = m => { err.textContent = m; err.hidden = false; };
     const u = unitOf(S.sel);
-    const body = {key:S.sel, type:S.formType, w:S.w};
-    if (S.formType==="prop"){
+    const body = {key:S.sel, type:S.formType==="del" ? "prop" : S.formType, w:S.formType==="del" ? null : S.w};
+    if (S.formType==="del"){
+      body.op = "repeal"; body.why = v("pwhy");
+      if (body.why.length < 10) return fail("Bitte begründen Sie die Streichung in mindestens einem Satz.");
+    } else if (S.formType==="prop"){
       body.text = v("ptext"); body.why = v("pwhy");
       if (!body.text) return fail("Bitte den neuen Wortlaut eintragen.");
       if (body.text===u.t) return fail("Der Wortlaut ist noch unverändert. Ändern Sie den Text oder schreiben Sie einen Kommentar.");

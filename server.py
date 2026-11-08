@@ -51,6 +51,10 @@ CREATE INDEX IF NOT EXISTS ix_norms_gnr ON norms(gnr, sort);
 CREATE TABLE IF NOT EXISTS meta(k TEXT PRIMARY KEY, v TEXT);
 CREATE TABLE IF NOT EXISTS reports(id INTEGER PRIMARY KEY, cid INTEGER NOT NULL, user_id INTEGER NOT NULL, reason TEXT NOT NULL, note TEXT,
   created INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'open', decided_by INTEGER, decided_at INTEGER, UNIQUE(cid, user_id));
+CREATE TABLE IF NOT EXISTS packages(id INTEGER PRIMARY KEY, title TEXT NOT NULL, summary TEXT NOT NULL, user_id INTEGER NOT NULL,
+  created INTEGER NOT NULL, updated INTEGER NOT NULL, removed_at INTEGER, removed_by INTEGER, removed_reason TEXT, removed_note TEXT);
+CREATE TABLE IF NOT EXISTS package_items(package_id INTEGER NOT NULL, cid INTEGER NOT NULL, pos INTEGER NOT NULL, PRIMARY KEY(package_id, cid));
+CREATE TABLE IF NOT EXISTS package_ratings(user_id INTEGER, package_id INTEGER, v TEXT, created INTEGER, PRIMARY KEY(user_id, package_id));
 CREATE TABLE IF NOT EXISTS resets(token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL, expires INTEGER NOT NULL, used INTEGER DEFAULT 0);
 """
 
@@ -119,6 +123,15 @@ def init_db(seed=True):
         c.execute("ALTER TABLE contributions ADD COLUMN removed_by INTEGER")
         c.execute("ALTER TABLE contributions ADD COLUMN removed_reason TEXT")
         c.execute("ALTER TABLE contributions ADD COLUMN removed_note TEXT")
+    if "op" not in cols:
+        c.execute("ALTER TABLE contributions ADD COLUMN op TEXT")          # 'repeal' = ersatzlos streichen
+    lcols = [r[1] for r in c.execute("PRAGMA table_info(laws)")]
+    if "aenderung" not in lcols:
+        c.execute("ALTER TABLE laws ADD COLUMN aenderung TEXT")           # Novellenliste aus dem RIS (mit CELEX-Nummern)
+        c.execute("DELETE FROM meta WHERE k='catalog_synced'")            # Katalog beim nächsten Start neu laden
+    ncols = [r[1] for r in c.execute("PRAGMA table_info(norms)")]
+    if "kundmachung" not in ncols:
+        c.execute("ALTER TABLE norms ADD COLUMN kundmachung TEXT")
     ucols = [r[1] for r in c.execute("PRAGMA table_info(users)")]
     if "consent_at" not in ucols:
         c.execute("ALTER TABLE users ADD COLUMN consent_at INTEGER")
@@ -287,7 +300,9 @@ def key_label(c, key, _cache={}):
     law = c.execute("SELECT abk, kurztitel FROM laws WHERE gnr=?", (parts[0],)).fetchone()
     n = c.execute("SELECT label FROM norms WHERE gnr=? AND pid=?", (parts[0], parts[1])).fetchone() if len(parts) > 1 else None
     out = ((law["abk"] or law["kurztitel"]) + " ") if law else ""
+    if len(parts) > 1 and parts[1] == "gesetz": return out + "(gesamte Rechtsvorschrift)"
     out += n["label"] if n else (parts[1] if len(parts) > 1 else "")
+    if parts[2:] == ["ganz"]: return out + " (gesamt)"
     for p in parts[2:]:
         m = re.match(r"^(abs|z|lit)(\w+?)(_\d+)?$", p)
         if m: out += {"abs": " Abs. ", "z": " Z ", "lit": " lit. "}[m.group(1)] + m.group(2)
@@ -308,7 +323,7 @@ def serialize(rows, stats, users):
         res.append({"id": r["id"], "key": r["key"], "type": r["type"], "text": r["text"], "why": r["why"],
                     "w": {"quote": r["w_quote"], "from": r["w_from"], "to": r["w_to"]} if r["w_quote"] else None,
                     "author": users.get(r["user_id"]), "example": bool(r["example"]), "via": r["via"], "base": r["base_text"],
-                    "where": key_label(db(), r["key"]),
+                    "where": key_label(db(), r["key"]), "op": r["op"], "amend": amend_for(db(), r),
                     "created": r["created"], "stats": stats[r["id"]]})
     return res
 
@@ -367,7 +382,7 @@ def _meta(doc):
     return {"nor": m["Technisch"]["ID"], "gnr": k.get("Gesetzesnummer"), "kurztitel": (b.get("Kurztitel") or "").strip(),
             "titel": re.sub(r"<br\s*/?>", " · ", b.get("Titel") or ""), "abk": k.get("Abkuerzung"), "typ": k.get("Typ") or "",
             "idx": idx, "kundmachung": k.get("Kundmachungsorgan"), "inkraft": k.get("Inkrafttretensdatum"),
-            "eli": b.get("Eli"), "label": k.get("ArtikelParagraphAnlage") or "", "xml": xml}
+            "eli": b.get("Eli"), "label": k.get("ArtikelParagraphAnlage") or "", "xml": xml, "aenderung": k.get("Aenderung")}
 
 def type_group(t):
     t = (t or "").strip()
@@ -403,10 +418,11 @@ def sync_catalog():
             except Exception as e:
                 sys.stderr.write("RIS-Katalog, Eintrag übersprungen: %r\n" % e); continue
             if not x["gnr"]: continue
-            c.execute("""INSERT INTO laws(gnr,kurztitel,titel,abk,typ,tgroup,idx,kundmachung,inkraft,eli,synced) VALUES(?,?,?,?,?,?,?,?,?,?,?)
+            c.execute("""INSERT INTO laws(gnr,kurztitel,titel,abk,typ,tgroup,idx,kundmachung,inkraft,eli,synced,aenderung) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
                          ON CONFLICT(gnr) DO UPDATE SET kurztitel=excluded.kurztitel,titel=excluded.titel,abk=excluded.abk,typ=excluded.typ,
-                         tgroup=excluded.tgroup,idx=excluded.idx,kundmachung=excluded.kundmachung,inkraft=excluded.inkraft,eli=excluded.eli,synced=excluded.synced""",
-                      (x["gnr"], x["kurztitel"], x["titel"], x["abk"], x["typ"], type_group(x["typ"]), x["idx"], x["kundmachung"], x["inkraft"], x["eli"], now()))
+                         tgroup=excluded.tgroup,idx=excluded.idx,kundmachung=excluded.kundmachung,inkraft=excluded.inkraft,eli=excluded.eli,synced=excluded.synced,
+                         aenderung=excluded.aenderung""",
+                      (x["gnr"], x["kurztitel"], x["titel"], x["abk"], x["typ"], type_group(x["typ"]), x["idx"], x["kundmachung"], x["inkraft"], x["eli"], now(), x["aenderung"]))
             n += 1
         c.commit()
         if page * 100 >= hits or not docs: break
@@ -452,9 +468,10 @@ def list_norms(gnr):
             pid = pid_of(x["label"])
             if pid in seen: pid = pid + "_" + x["nor"][-4:].lower()
             seen.add(pid)
-            c.execute("""INSERT INTO norms(nor,gnr,pid,label,sort,inkraft,xml_url) VALUES(?,?,?,?,?,?,?)
-                         ON CONFLICT(nor) DO UPDATE SET pid=excluded.pid,label=excluded.label,sort=excluded.sort,inkraft=excluded.inkraft,xml_url=excluded.xml_url""",
-                      (x["nor"], gnr, pid, x["label"], sort_key(x["label"], i), x["inkraft"], x["xml"]))
+            c.execute("""INSERT INTO norms(nor,gnr,pid,label,sort,inkraft,xml_url,kundmachung) VALUES(?,?,?,?,?,?,?,?)
+                         ON CONFLICT(nor) DO UPDATE SET pid=excluded.pid,label=excluded.label,sort=excluded.sort,inkraft=excluded.inkraft,xml_url=excluded.xml_url,
+                         kundmachung=excluded.kundmachung""",
+                      (x["nor"], gnr, pid, x["label"], sort_key(x["label"], i), x["inkraft"], x["xml"], x["kundmachung"]))
         c.execute("UPDATE laws SET norms_listed=?, n_norms=? WHERE gnr=?", (now(), len(rows), gnr)); c.commit()
 
 def _txt(el):
@@ -583,13 +600,229 @@ def ris_background():
         sys.stderr.write("RIS-Hintergrund: %r\n" % e)
 
 def unit_text(key):
-    """Aktueller Text einer Einheit 'gnr/pid/abs1/z2' – für den Ausgangstext eines Vorschlags."""
+    """Aktueller Text einer Einheit 'gnr/pid/abs1/z2' – für den Ausgangstext eines Vorschlags.
+    Sonderfälle: 'gnr/pid/ganz' = ganze Norm, 'gnr/gesetz/ganz' = ganze Rechtsvorschrift."""
     parts = key.split("/")
     if len(parts) < 3: return None
+    if parts[1] == "gesetz":
+        if parts[2:] != ["ganz"]: return None
+        law = db().execute("SELECT kurztitel, n_norms FROM laws WHERE gnr=?", (parts[0],)).fetchone()
+        return f"{law['kurztitel']} (gesamte Rechtsvorschrift)" if law else None
     r = db().execute("SELECT body FROM norms WHERE gnr=? AND pid=?", (parts[0], parts[1])).fetchone()
     if not r or not r["body"]: return None
+    units = json.loads(r["body"])["units"]
     a = "/".join(parts[2:])
-    return next((u["t"] for u in json.loads(r["body"])["units"] if u["a"] == a), None)
+    if a == "ganz":
+        return " ".join((u["n"] + " " + u["t"]).strip() for u in units) or None
+    return next((u["t"] for u in units if u["a"] == a), None)
+
+def whole_key(key):
+    """'ganz' = ganze Norm, 'gesetz' = ganze Rechtsvorschrift, sonst None."""
+    p = key.split("/")
+    if len(p) == 3 and p[2] == "ganz": return "gesetz" if p[1] == "gesetz" else "ganz"
+    return None
+
+# ---------- Novellierungstext (legistischer Entwurf aus Vorschlägen) ----------
+# Erzeugt Novellierungsanordnungen nach den Legistischen Richtlinien des Bundes (vereinfacht):
+#   „In § 74 Abs. 2 Z 1 wird das Wort „X“ durch die Wortfolge „Y“ ersetzt.“ · „… wird nach … eingefügt.“
+#   „In § 74 Abs. 2 entfällt die Wortfolge „X“.“ · „§ 74 Abs. 2 Z 1 lautet: …“ · „§ 74 Abs. 2 Z 1 entfällt.“
+# Der Entwurf ist ein Ausgangspunkt für die legistische Prüfung, keine fertige Regierungsvorlage.
+import difflib
+
+def _q(t): return "„" + t + "“"
+def _wf(words): return ("das Wort " if len(words) == 1 else "die Wortfolge ") + _q(" ".join(words))
+def _wf_dat(words): return ("dem Wort " if len(words) == 1 else "der Wortfolge ") + _q(" ".join(words))
+
+def _count(words, seq):
+    n = len(seq)
+    return sum(1 for i in range(len(words) - n + 1) if words[i:i + n] == seq) if n else 0
+
+def norm_ref(c, key):
+    """'10007517/p74/abs2/z1' -> '§ 74 Abs. 2 Z 1' (ohne Gesetz)."""
+    parts = key.split("/")
+    n = c.execute("SELECT label FROM norms WHERE gnr=? AND pid=?", (parts[0], parts[1])).fetchone()
+    out = n["label"] if n else parts[1]
+    for p in parts[2:]:
+        m = re.match(r"^(abs|z|lit)(\w+?)(_\d+)?$", p)
+        if m: out += {"abs": " Abs. ", "z": " Z ", "lit": " lit. "}[m.group(1)] + m.group(2)
+        elif p.startswith("s"): out += " Schlussteil"
+    return out
+
+def _unit_no(c, key):
+    parts = key.split("/")
+    r = c.execute("SELECT body FROM norms WHERE gnr=? AND pid=?", (parts[0], parts[1])).fetchone()
+    if not r or not r["body"]: return ""
+    a = "/".join(parts[2:])
+    u = next((u for u in json.loads(r["body"])["units"] if u["a"] == a), None)
+    return (u or {}).get("n") or ""
+
+def _has_heading(c, key):
+    parts = key.split("/")
+    r = c.execute("SELECT title FROM norms WHERE gnr=? AND pid=?", (parts[0], parts[1])).fetchone()
+    return bool(r and r["title"])
+
+def amendment_instruction(c, row):
+    """Novellierungsanordnung für einen Vorschlag (sqlite-Row oder dict mit key, op, base_text, text)."""
+    key, op, base, new = row["key"], row["op"], row["base_text"] or "", row["text"] or ""
+    whole = whole_key(key)
+    if whole == "gesetz": return None                       # Aufhebung eines ganzen Gesetzes: eigener Artikel, siehe draft_bill
+    ref = norm_ref(c, key)
+    if whole == "ganz":
+        return f"{ref} samt Überschrift entfällt." if _has_heading(c, key) else f"{ref} entfällt."
+    if op == "repeal": return f"{ref} entfällt."
+    A, B = base.split(), new.split()
+    if not A: return f"{ref} lautet:\n{_q(new)}"
+    ops = [o for o in difflib.SequenceMatcher(None, A, B, autojunk=False).get_opcodes() if o[0] != "equal"]
+    changed = sum(max(i2 - i1, j2 - j1) for _, i1, i2, j1, j2 in ops)
+    if not ops: return None
+    if len(ops) > 3 or changed > 0.5 * len(A):
+        no = _unit_no(c, key)
+        return f"{ref} lautet:\n{_q((no + ' ' if no else '') + new)}"
+    out = []
+    for tag, i1, i2, j1, j2 in reversed(ops):          # von hinten, damit Positionen stabil bleiben (Ausgabe danach umgedreht)
+        old, ins = A[i1:i2], B[j1:j2]
+        # Kontext erweitern, bis die zu ändernde Wortfolge im Ausgangstext eindeutig ist
+        l, r = i1, i2; jl, jr = j1, j2
+        while tag != "insert" and _count(A, A[l:r]) > 1 and (l > 0 or r < len(A)):
+            if l > 0: l -= 1; jl -= 1
+            elif r < len(A): r += 1; jr += 1
+        if tag == "insert":
+            if i1 > 0:
+                k = i1 - 1
+                while _count(A, A[k:i1]) > 1 and k > 0: k -= 1
+                out.append(f"In {ref} wird nach {_wf_dat(A[k:i1])} {_wf(ins)} eingefügt.")
+            else:
+                k = 1
+                while _count(A, A[0:k]) > 1 and k < len(A): k += 1
+                out.append(f"In {ref} wird vor {_wf_dat(A[0:k])} {_wf(ins)} eingefügt.")
+        elif tag == "delete" and (l, r) == (i1, i2):
+            out.append(f"In {ref} entfällt {_wf(old)}.")
+        else:
+            o, n = A[l:r], B[jl:jr]
+            if not n: out.append(f"In {ref} entfällt {_wf(o)}.")
+            else: out.append(f"In {ref} wird {_wf(o)} durch {_wf(n)} ersetzt.")
+    return " ".join(reversed(out))
+
+_GENUS = (("ordnung", "die"), ("verordnung", "die"), ("novelle", "die"), ("vereinbarung", "die"), ("kundmachung", "die"),
+          ("satzung", "die"), ("vertrag", "der"), ("kodex", "der"), ("tarif", "der"), ("abkommen", "das"), ("übereinkommen", "das"),
+          ("protokoll", "das"), ("statut", "das"), ("gesetz", "das"), ("recht", "das"))
+def law_article(name):
+    """Bestimmter Artikel zum Kurztitel, z. B. 'die Gewerbeordnung 1994', 'das ASVG'."""
+    w = [x for x in re.split(r"[\s\-–]+", name or "") if x and not re.fullmatch(r"[\d/.,()]+", x)]
+    last = (w[-1] if w else "").lower()
+    for suf, art in _GENUS:
+        if last.endswith(suf): return art
+    return "das" if name.isupper() or re.fullmatch(r"[A-ZÄÖÜ\-]+G", (name or "").split()[0]) else "die"
+def _acc(art): return {"der": "den"}.get(art, art)
+def _gen(art): return {"der": "des", "das": "des", "die": "der"}[art]
+
+def last_change(aenderung):
+    """Letzte Kundmachung aus der RIS-Änderungsliste, z. B. 'BGBl. I Nr. 56/2025'."""
+    found = re.findall(r"BGBl\.\s*(?:I{1,3}\s*)?Nr\.\s*\d+/\d{4}", aenderung or "")
+    return re.sub(r"\s+", " ", found[-1]) if found else None
+
+def law_citation(c, gnr):
+    law = c.execute("SELECT * FROM laws WHERE gnr=?", (gnr,)).fetchone()
+    name = law["kurztitel"] if law else gnr
+    stamm = law["kundmachung"] if law else None
+    m = re.search(r"StF:\s*([^·]+)", (law["titel"] if law else "") or "")
+    if m: stamm = re.sub(r"\s*\((?:WV|DFB)\)\s*$", "", m.group(1).strip())
+    last = last_change(law["aenderung"] if law else None)
+    cit = f"{name}, {stamm}" if stamm else name
+    if last and last != stamm: cit += f", zuletzt geändert durch {last}"
+    return law, name, cit
+
+def _sort_key(c, key):
+    parts = key.split("/")
+    if parts[1] == "gesetz": return (-1, -1)
+    n = c.execute("SELECT sort, body FROM norms WHERE gnr=? AND pid=?", (parts[0], parts[1])).fetchone()
+    if not n: return (10**12, 0)
+    idx = 0
+    if n["body"] and len(parts) > 2 and parts[2] != "ganz":
+        a = "/".join(parts[2:]); units = json.loads(n["body"])["units"]
+        idx = next((i for i, u in enumerate(units) if u["a"] == a), 0) + 1
+    return (n["sort"], idx)
+
+def draft_bill(c, rows, title=None):
+    """Entwurf (Text) aus Vorschlägen: ein Bundesgesetz (Sammelnovelle bei mehreren Gesetzen), Verordnungen getrennt."""
+    by = {}
+    for r in rows:
+        if r["type"] != "prop": continue
+        by.setdefault(r["key"].split("/")[0], []).append(r)
+    laws, other = [], []
+    for gnr, lst in by.items():
+        law = c.execute("SELECT tgroup FROM laws WHERE gnr=?", (gnr,)).fetchone()
+        (laws if (law and law["tgroup"] == "g") or not law else other).append((gnr, sorted(lst, key=lambda r: _sort_key(c, r["key"]))))
+    laws.sort(key=lambda x: (c.execute("SELECT kurztitel FROM laws WHERE gnr=?", (x[0],)).fetchone() or [""])[0])
+
+    def body_for(gnr, lst, materials):
+        law, name, cit = law_citation(c, gnr); art = law_article(name)
+        rep = next((r for r in lst if whole_key(r["key"]) == "gesetz"), None)
+        if rep:
+            materials.append((f"Aufhebung {_gen(art)} {name}", rep["why"]))
+            return [f"{art.capitalize()} {cit}, wird aufgehoben."], True
+        lines = [f"{art.capitalize()} {cit}, wird wie folgt geändert:", ""]
+        z = 0
+        for r in lst:
+            t = amendment_instruction(c, r)
+            if not t: continue
+            z += 1; lines += [f"{z}. {t}", ""]
+            materials.append((f"Zu Z {z} ({norm_ref(c, r['key'])})", r["why"]))
+        return lines[:-1], False
+
+    out = ["ENTWURF – automatisch aus Vorschlägen auf Offenes Recht erzeugt. Vor einer Einbringung legistisch prüfen",
+           "(Verweise, Inkrafttreten, Übergangsbestimmungen, Notifikation).", ""]
+    if title: out += [title, ""]
+    mats_all = []
+    if laws:
+        names = []
+        for gnr, lst in laws:
+            _, name, _ = law_citation(c, gnr); art = law_article(name)
+            aufh = any(whole_key(r["key"]) == "gesetz" for r in lst)
+            names.append((f"{_acc(art)} {name}", aufh))
+        ch = [n for n, a in names if not a]; au = [n for n, a in names if a]
+        def join(xs): return xs[0] if len(xs) == 1 else ", ".join(xs[:-1]) + " und " + xs[-1]
+        verb = " und ".join(p for p in (
+            (join(ch) + (" geändert wird" if len(ch) == 1 else " geändert werden")) if ch else "",
+            (join(au) + (" aufgehoben wird" if len(au) == 1 else " aufgehoben werden")) if au else "") if p)
+        if len(laws) == 1:
+            out += [f"Bundesgesetz, mit dem {verb}", "", "Der Nationalrat hat beschlossen:", ""]
+            lines, _ = body_for(laws[0][0], laws[0][1], mats_all); out += lines + [""]
+        else:
+            out += [f"Bundesgesetz, mit dem {verb}", "", "Der Nationalrat hat beschlossen:", "", "Inhaltsverzeichnis", ""]
+            heads = []
+            for i, (gnr, lst) in enumerate(laws, 1):
+                _, name, _ = law_citation(c, gnr); art = law_article(name)
+                aufh = any(whole_key(r["key"]) == "gesetz" for r in lst)
+                heads.append(f"{'Aufhebung' if aufh else 'Änderung'} {_gen(art)} {name}")
+                out.append(f"Artikel {i}\t{heads[-1]}")
+            out.append("")
+            for i, (gnr, lst) in enumerate(laws, 1):
+                mats = []
+                out += [f"Artikel {i}", heads[i - 1], ""]
+                lines, _ = body_for(gnr, lst, mats); out += lines + [""]
+                mats_all += [(f"Artikel {i}, {k}", w) for k, w in mats]
+    for gnr, lst in other:
+        _, name, _ = law_citation(c, gnr); art = law_article(name)
+        out += ["", "––––", "", f"Verordnung, mit der {_acc(art)} {name} geändert wird",
+                "", "[Verordnungsgeber und Rechtsgrundlage ergänzen]", ""]
+        mats = []; lines, _ = body_for(gnr, lst, mats); out += lines + [""]
+        mats_all += [(f"{name}, {k}", w) for k, w in mats]
+    if mats_all:
+        out += ["", "Erläuterungen", "", "Besonderer Teil", ""]
+        for k, w in mats_all:
+            out += [k + ":", (w or "").strip() or "(ohne Begründung)", ""]
+    return "\n".join(out).rstrip() + "\n"
+
+_amend_cache = {}
+def amend_for(c, r):
+    if r["type"] != "prop" or r["removed_at"]: return None
+    k = (r["id"], r["text"], r["base_text"])
+    if k not in _amend_cache:
+        try: _amend_cache[k] = amendment_instruction(c, r)
+        except Exception as e:
+            sys.stderr.write("Novellierungstext %s: %r\n" % (r["id"], e)); _amend_cache[k] = None
+    return _amend_cache[k]
 
 # ---------- HTTP ----------
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -603,7 +836,7 @@ def need(cond, code, msg):
     if not cond: raise ApiError(code, msg)
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "OffenesRecht/1.2"
+    server_version = "OffenesRecht/1.3"
 
     def log_message(self, fmt, *a):
         # bewusst ohne IP-Adresse (Datenschutz); Fehlersuche über Pfad und Status
@@ -811,20 +1044,29 @@ def create_contribution(u, d, via):
     key = d.get("key") or ""; typ = d.get("type")
     need(KEY_RE.match(key), 400, "Ungültige Stelle im Normtext.")
     need(typ in ("com", "prop"), 400, "Ungültige Beitragsart.")
-    text = (d.get("text") or "").strip(); why = (d.get("why") or "").strip()
-    need(5 <= len(text) <= 8000, 400, "Bitte mindestens einen kurzen Satz schreiben.")
+    op = "repeal" if (typ == "prop" and d.get("op") == "repeal") else None
+    whole = whole_key(key)
+    need(not whole or op, 400, "Für eine ganze Norm oder Rechtsvorschrift ist nur ein Streichungsvorschlag möglich.")
+    text = "" if op else (d.get("text") or "").strip(); why = (d.get("why") or "").strip()
+    if not op: need(5 <= len(text) <= 8000, 400, "Bitte mindestens einen kurzen Satz schreiben.")
     if typ == "prop": need(len(why) >= 10, 400, "Bitte den Vorschlag in mindestens einem Satz begründen.")
-    w = d.get("w") or {}
+    w = {} if op else (d.get("w") or {})
     wq = (w.get("quote") or "").strip()[:400] or None
     gnr, pid = key.split("/")[:2]
-    norm = db().execute("SELECT nor, body FROM norms WHERE gnr=? AND pid=?", (gnr, pid)).fetchone()
-    need(norm is not None, 400, "Diese Stelle gibt es im Normtext nicht.")
-    if not norm["body"]: fetch_norm(norm["nor"])
+    if whole == "gesetz":
+        need(db().execute("SELECT 1 FROM laws WHERE gnr=?", (gnr,)).fetchone(), 400, "Diese Rechtsvorschrift gibt es nicht.")
+    else:
+        norm = db().execute("SELECT nor, body FROM norms WHERE gnr=? AND pid=?", (gnr, pid)).fetchone()
+        need(norm is not None, 400, "Diese Stelle gibt es im Normtext nicht.")
+        if not norm["body"]: fetch_norm(norm["nor"])
     base = unit_text(key)
     need(base is not None, 400, "Diese Stelle gibt es im Normtext nicht.")
-    cur = db().execute("""INSERT INTO contributions(key,type,text,why,w_quote,w_from,w_to,user_id,via,created,base_text)
-                          VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
-                       (key, typ, text, why or None, wq, w.get("from") if wq else None, w.get("to") if wq else None, u["id"], via, now(), base))
+    if op:
+        need(not db().execute("SELECT 1 FROM contributions WHERE key=? AND op='repeal' AND user_id=? AND removed_at IS NULL", (key, u["id"])).fetchone(),
+             409, "Sie haben die Streichung dieser Stelle bereits vorgeschlagen.")
+    cur = db().execute("""INSERT INTO contributions(key,type,text,why,w_quote,w_from,w_to,user_id,via,created,base_text,op)
+                          VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                       (key, typ, text, why or None, wq, w.get("from") if wq else None, w.get("to") if wq else None, u["id"], via, now(), base, op))
     db().commit()
     return {"id": cur.lastrowid}
 
@@ -881,13 +1123,19 @@ def r_g_pending(h):
     reps = []
     for r in c.execute("""SELECT cid, COUNT(*) n, GROUP_CONCAT(reason) reasons, MIN(created) first FROM reports WHERE status='open'
                           GROUP BY cid ORDER BY n DESC, first""").fetchall():
-        cr = c.execute("SELECT * FROM contributions WHERE id=?", (r["cid"],)).fetchone()
+        if r["cid"] < 0:   # gemeldetes Reformpaket
+            pk = c.execute("SELECT * FROM packages WHERE id=?", (-r["cid"],)).fetchone()
+            cr = {"user_id": pk["user_id"], "removed_at": pk["removed_at"], "key": "", "type": "package",
+                  "text": pk["title"] + " – " + pk["summary"]} if pk else None
+        else:
+            cr = c.execute("SELECT * FROM contributions WHERE id=?", (r["cid"],)).fetchone()
         if not cr or cr["removed_at"]:
             c.execute("UPDATE reports SET status='done' WHERE cid=? AND status='open'", (r["cid"],)); continue
         au = c.execute("SELECT name, role FROM users WHERE id=?", (cr["user_id"],)).fetchone()
         notes = [x["note"] for x in c.execute("SELECT note FROM reports WHERE cid=? AND status='open' AND note IS NOT NULL AND note!=''", (r["cid"],))]
         reps.append({"cid": r["cid"], "count": r["n"], "reasons": [REMOVE_REASONS.get(x, x) for x in sorted(set(r["reasons"].split(",")))],
-                     "notes": notes[:5], "key": cr["key"], "where": key_label(c, cr["key"]), "type": cr["type"], "text": cr["text"][:600],
+                     "notes": notes[:5], "key": cr["key"], "where": ("Reformpaket " + str(-r["cid"])) if r["cid"] < 0 else key_label(c, cr["key"]),
+                     "type": cr["type"], "text": cr["text"][:600],
                      "author": (au["name"] + (" (KI-Bot)" if au["role"] == "bot" else "")) if au else "", "first": r["first"]})
     c.commit()
     return {"pending": [full(r) for r in pend], "bots": [lim(r) for r in active], "reports": reps, "reasons": REMOVE_REASONS,
@@ -917,7 +1165,8 @@ def r_report(h):
     reason = d.get("reason"); need(reason in REMOVE_REASONS, 400, "Bitte einen Grund wählen.")
     note = (d.get("note") or "").strip()[:1000]
     if reason == "other": need(len(note) >= 10, 400, "Bitte kurz beschreiben, was gegen die Regeln verstößt.")
-    r = c.execute("SELECT user_id, removed_at FROM contributions WHERE id=?", (cid,)).fetchone()
+    if cid < 0: r = c.execute("SELECT user_id, removed_at FROM packages WHERE id=?", (-cid,)).fetchone()
+    else: r = c.execute("SELECT user_id, removed_at FROM contributions WHERE id=?", (cid,)).fetchone()
     need(r and not r["removed_at"], 404, "Beitrag nicht gefunden.")
     need(r["user_id"] != u["id"], 403, "Eigene Beiträge können Sie unter „Mein Konto“ löschen.")
     need(c.execute("SELECT COUNT(*) FROM reports WHERE user_id=? AND created>?", (u["id"], now() - 86400)).fetchone()[0] < 20, 429,
@@ -929,8 +1178,9 @@ def r_report(h):
 def r_g_moderate(h):
     g = require_gremium(h); d = h.body(); c = db()
     cid = int(d.get("cid") or 0); dec = d.get("decision")
-    r = c.execute("SELECT * FROM contributions WHERE id=?", (cid,)).fetchone(); need(r, 404, "Beitrag nicht gefunden.")
     note = (d.get("note") or "").strip()[:500]
+    if cid < 0: return _moderate_package(g, c, -cid, dec, d.get("reason"), note)
+    r = c.execute("SELECT * FROM contributions WHERE id=?", (cid,)).fetchone(); need(r, 404, "Beitrag nicht gefunden.")
     if dec == "remove":
         reason = d.get("reason"); need(reason in REMOVE_REASONS, 400, "Bitte einen Grund wählen.")
         need(len(note) >= 10, 400, "Bitte die Entfernung kurz begründen; die Begründung wird öffentlich am Beitrag vermerkt.")
@@ -950,17 +1200,44 @@ def r_g_moderate(h):
         raise ApiError(400, "Ungültige Entscheidung.")
     c.commit(); return {"ok": True}
 
+def _moderate_package(g, c, pid, dec, reason, note):
+    p = c.execute("SELECT * FROM packages WHERE id=?", (pid,)).fetchone(); need(p, 404, "Paket nicht gefunden.")
+    lbl = f"Reformpaket {pid} („{p['title'][:60]}“)"
+    if dec == "remove":
+        need(reason in REMOVE_REASONS, 400, "Bitte einen Grund wählen.")
+        need(len(note) >= 10, 400, "Bitte die Entfernung kurz begründen; die Begründung wird öffentlich vermerkt.")
+        need(not p["removed_at"], 409, "Das Paket ist bereits entfernt.")
+        c.execute("UPDATE packages SET removed_at=?, removed_by=?, removed_reason=?, removed_note=? WHERE id=?", (now(), g["id"], reason, note, pid))
+        c.execute("UPDATE reports SET status='upheld', decided_by=?, decided_at=? WHERE cid=? AND status='open'", (g["id"], now(), -pid))
+        log(g["id"], "moderation:remove", p["user_id"], f"{lbl}: {REMOVE_REASONS[reason]} · {note}")
+    elif dec == "dismiss":
+        n = c.execute("UPDATE reports SET status='dismissed', decided_by=?, decided_at=? WHERE cid=? AND status='open'", (g["id"], now(), -pid)).rowcount
+        log(g["id"], "moderation:dismiss", p["user_id"], f"{lbl}: {n} Meldung(en) zurückgewiesen" + (f" · {note}" if note else ""))
+    elif dec == "restore":
+        need(p["removed_at"], 409, "Das Paket ist nicht entfernt.")
+        need(len(note) >= 10, 400, "Bitte die Wiederherstellung kurz begründen.")
+        c.execute("UPDATE packages SET removed_at=NULL, removed_by=NULL, removed_reason=NULL, removed_note=NULL WHERE id=?", (pid,))
+        log(g["id"], "moderation:restore", p["user_id"], f"{lbl} wiederhergestellt · {note}")
+    else:
+        raise ApiError(400, "Ungültige Entscheidung.")
+    c.commit(); return {"ok": True}
+
 def r_moderation_log(h):
     """Öffentliches Moderationsprotokoll: Entfernungen und Wiederherstellungen, ohne Inhalte und ohne Namen der Meldenden."""
     c = db()
     removed = [{"id": r["id"], "where": key_label(c, r["key"]), "key": r["key"], "type": "proposal" if r["type"] == "prop" else "comment",
                 "at": r["removed_at"], "reason": REMOVE_REASONS.get(r["removed_reason"], r["removed_reason"]), "note": r["removed_note"]}
                for r in c.execute("SELECT * FROM contributions WHERE removed_at IS NOT NULL ORDER BY removed_at DESC LIMIT 200")]
+    removed += [{"id": -r["id"], "where": f"Reformpaket {r['id']}", "key": "", "type": "package", "at": r["removed_at"],
+                 "reason": REMOVE_REASONS.get(r["removed_reason"], r["removed_reason"]), "note": r["removed_note"]}
+                for r in c.execute("SELECT * FROM packages WHERE removed_at IS NOT NULL ORDER BY removed_at DESC LIMIT 100")]
+    removed.sort(key=lambda x: -x["at"])
     stats = {"reports_total": c.execute("SELECT COUNT(*) FROM reports").fetchone()[0],
              "reports_open": c.execute("SELECT COUNT(*) FROM reports WHERE status='open'").fetchone()[0],
              "reports_upheld": c.execute("SELECT COUNT(*) FROM reports WHERE status='upheld'").fetchone()[0],
              "reports_dismissed": c.execute("SELECT COUNT(*) FROM reports WHERE status='dismissed'").fetchone()[0],
-             "removed": c.execute("SELECT COUNT(*) FROM contributions WHERE removed_at IS NOT NULL").fetchone()[0],
+             "removed": c.execute("SELECT COUNT(*) FROM contributions WHERE removed_at IS NOT NULL").fetchone()[0]
+                        + c.execute("SELECT COUNT(*) FROM packages WHERE removed_at IS NOT NULL").fetchone()[0],
              "restored": c.execute("SELECT COUNT(*) FROM audit WHERE action='moderation:restore'").fetchone()[0]}
     return {"removed": removed, "stats": stats}
 
@@ -1102,9 +1379,14 @@ def r_delete_account(h):
             c.execute("DELETE FROM ratings WHERE cid=?", (i,))
             c.execute("DELETE FROM pairwise WHERE a=? OR b=? OR winner=?", (i, i, i))
         c.execute("DELETE FROM contributions WHERE user_id=?", (uid,))
+        for (pk,) in c.execute("SELECT id FROM packages WHERE user_id=?", (uid,)).fetchall():
+            c.execute("DELETE FROM package_items WHERE package_id=?", (pk,)); c.execute("DELETE FROM package_ratings WHERE package_id=?", (pk,))
+        c.execute("DELETE FROM packages WHERE user_id=?", (uid,))
         kept = 0
     else:
-        kept = c.execute("SELECT COUNT(*) FROM contributions WHERE user_id=?", (uid,)).fetchone()[0]
+        kept = c.execute("SELECT COUNT(*) FROM contributions WHERE user_id=?", (uid,)).fetchone()[0] \
+             + c.execute("SELECT COUNT(*) FROM packages WHERE user_id=?", (uid,)).fetchone()[0]
+    c.execute("DELETE FROM package_ratings WHERE user_id=?", (uid,))
     if kept:
         # Konto anonymisieren: Beiträge bleiben unter "Gelöschtes Konto" stehen
         c.execute("""UPDATE users SET email=?, name='Gelöschtes Konto', pw_hash='!', status='deleted', gremium=0, org_register=NULL,
@@ -1172,7 +1454,7 @@ def r_norm(h):
 # mit API-Schlüssel (Authorization: Bearer …). REST und MCP verwenden dieselben Kernfunktionen.
 from urllib.parse import unquote
 
-APP_VERSION = "1.2"
+APP_VERSION = "1.3"
 READ_LIMIT_PER_MIN = int(os.environ.get("OR_API_READ_LIMIT", "120"))
 WRITE_LIMIT_PER_HOUR = int(os.environ.get("OR_API_WRITE_HOUR", "20"))
 WRITE_LIMIT_PER_DAY = int(os.environ.get("OR_API_WRITE_DAY", "100"))
@@ -1310,6 +1592,9 @@ def api_contribution(r, st, users, c):
            "via": r["via"], "example": bool(r["example"]), "rating": rating}
     if r["type"] == "prop":
         out["reason"] = r["why"]; out["base_text"] = r["base_text"]
+        out["operation"] = "repeal" if r["op"] == "repeal" else "replace"
+        if r["op"] == "repeal": out["text"] = None
+        out["amendment_instruction"] = amend_for(c, r)
         out["norm_changed_since"] = bool(cur and r["base_text"] and cur != r["base_text"])
     if r["w_quote"]: out["quote"] = {"text": r["w_quote"], "word_from": r["w_from"], "word_to": r["w_to"]}
     return out
@@ -1349,6 +1634,10 @@ def _resolve_key(key):
     key = (key or "").strip()
     need(KEY_RE.match(key), 400, "Ungültiger Schlüssel. Format: Gesetzesnummer/Paragraph/Absatz…, z. B. 10007517/p74/abs2/z1. get_norm liefert die Schlüssel.")
     gnr, pid = key.split("/")[:2]
+    if pid == "gesetz":
+        need(key.split("/")[2:] == ["ganz"] and db().execute("SELECT 1 FROM laws WHERE gnr=?", (gnr,)).fetchone(), 404,
+             "Für die ganze Rechtsvorschrift lautet der Schlüssel 'Gesetzesnummer/gesetz/ganz'.")
+        return key, unit_text(key)
     resolve_norm(gnr, pid)
     r = db().execute("SELECT nor, body FROM norms WHERE gnr=? AND pid=?", (gnr, pid)).fetchone()
     if not r["body"]:
@@ -1358,11 +1647,21 @@ def _resolve_key(key):
     need(t is not None, 404, "Diese Stelle gibt es im Normtext nicht. get_norm liefert die gültigen Schlüssel.")
     return key, t
 
-def api_post(bot, key, type, text, reason=None, quote=None):
+def _need_bot(bot):
     need(bot is not None, 401, "Schreiben erfordert den API-Schlüssel eines zugelassenen Bots (Authorization: Bearer …).")
     need(bot["role"] == "bot" and bot["status"] == "active", 403, "Dieser Bot ist nicht zugelassen.")
+
+def api_post(bot, key, type, text, reason=None, quote=None):
+    _need_bot(bot)
+    if (type or "").lower() in ("repeal", "streichung"):
+        if (key or "").count("/") == 1: key = key.rstrip("/") + "/ganz"          # 'gnr/p74' = ganzer Paragraph
+        key, unit = _resolve_key(key)
+        write_limit(bot)
+        res = create_contribution(bot, {"key": key, "type": "prop", "op": "repeal", "why": reason}, "api")
+        log(bot["id"], "api-post", res["id"]); db().commit()
+        return api_get_contribution(res["id"])
     key, unit = _resolve_key(key)
-    t = TYPE_IN.get((type or "").lower()); need(t, 400, "type: comment oder proposal.")
+    t = TYPE_IN.get((type or "").lower()); need(t, 400, "type: comment, proposal oder repeal.")
     w = None
     if quote:
         q = re.sub(r"\s+", " ", quote).strip()
@@ -1382,6 +1681,41 @@ def api_me(bot):
                        "used_last_hour": c.execute("SELECT COUNT(*) FROM contributions WHERE user_id=? AND created>?", (bot["id"], now() - 3600)).fetchone()[0],
                        "used_last_day": c.execute("SELECT COUNT(*) FROM contributions WHERE user_id=? AND created>?", (bot["id"], now() - 86400)).fetchone()[0]},
             "contributions": c.execute("SELECT COUNT(*) FROM contributions WHERE user_id=?", (bot["id"],)).fetchone()[0]}
+
+def api_package(pid):
+    c = db(); p = c.execute("SELECT * FROM packages WHERE id=?", (int(pid),)).fetchone(); need(p, 404, "Paket nicht gefunden.")
+    need(not p["removed_at"], 410, "Dieses Paket wurde von der Moderation entfernt.")
+    v = package_view(c, p, all_users(c), full=True); users = all_users(c)
+    rows = [r for r in _pkg_items(c, p["id"]) if not r["removed_at"]]
+    st = contribution_stats(c, rows)
+    a = v["author"] or {}
+    return {"id": v["id"], "title": v["title"], "summary": v["summary"], "url": f"{PUBLIC_URL}/#/paket/{v['id']}",
+            "author": {"name": a.get("name"), "kind": KIND_OUT.get(a.get("role"), a.get("role"))}, "created": iso(v["created"]), "updated": iso(v["updated"]),
+            "laws": v["laws"], "proposals": [api_contribution(r, st[r["id"]], users, c) for r in rows],
+            "rating": {"status": v["stats"]["status"], "approval": v["stats"]["share"], "approval_lower_bound": v["stats"]["lower"],
+                       "votes": v["stats"]["total"], "yes": v["stats"]["h"], "partly": v["stats"]["t"], "no": v["stats"]["n"]},
+            "draft": v["draft"]}
+
+def api_list_packages(limit=20, offset=0):
+    c = db(); users = all_users(c)
+    rows = [package_view(c, p, users) for p in c.execute("SELECT * FROM packages WHERE removed_at IS NULL").fetchall()]
+    rows.sort(key=lambda x: (-x["stats"]["score"], -x["updated"]))
+    limit = min(100, max(1, int(limit or 20))); offset = max(0, int(offset or 0))
+    return {"total": len(rows), "offset": offset, "results": [
+        {"id": x["id"], "title": x["title"], "summary": x["summary"], "proposals": x["n"], "repeals": x["n_repeal"], "laws": x["laws"],
+         "approval": x["stats"]["share"], "approval_lower_bound": x["stats"]["lower"], "votes": x["stats"]["total"], "status": x["stats"]["status"],
+         "url": f"{PUBLIC_URL}/#/paket/{x['id']}"} for x in rows[offset:offset + limit]]}
+
+def api_create_package(bot, title, summary, proposal_ids):
+    _need_bot(bot); write_limit(bot)
+    return api_package(create_package(bot, {"title": title, "summary": summary, "items": proposal_ids}, via="api"))
+
+def api_draft(ids):
+    c = db()
+    ids = [int(x) for x in (ids or [])][:PKG_MAX]; need(ids, 400, "Bitte mindestens eine Vorschlags-ID angeben.")
+    _check_items(c, ids)
+    rows = [c.execute("SELECT * FROM contributions WHERE id=?", (i,)).fetchone() for i in ids]
+    return {"text": draft_bill(c, rows)}
 
 # --- REST-Endpunkte
 def _int(h, k, d):
@@ -1406,6 +1740,16 @@ def v1_post(h):
     w = d.get("w") or {}
     return api_post(b, d.get("key"), d.get("type"), d.get("text"), d.get("reason") or d.get("why"), d.get("quote") or w.get("quote"))
 def v1_openapi(h): return openapi_spec()
+def v1_packages(h): _bot(h); return api_list_packages(_int(h, "limit", 20), _int(h, "offset", 0))
+def v1_package(h, pid): _bot(h); return api_package(pid)
+def v1_package_post(h):
+    b = _bot(h); d = h.body()
+    return api_create_package(b, d.get("title"), d.get("summary"), d.get("proposal_ids") or d.get("items"))
+def v1_draft(h):
+    _bot(h)
+    try: ids = [int(x) for x in (h.query.get("ids") or "").split(",") if x.strip()]
+    except ValueError: raise ApiError(400, "ids: kommagetrennte Beitrags-IDs.")
+    return api_draft(ids)
 
 API_PATTERNS = [
     ("GET", re.compile(r"^/api/v1/laws$"), v1_laws),
@@ -1417,6 +1761,10 @@ API_PATTERNS = [
     ("GET", re.compile(r"^/api/v1/proposals/top$"), v1_top),
     ("GET", re.compile(r"^/api/v1/me$"), v1_me),
     ("GET", re.compile(r"^/api/v1/openapi\.json$"), v1_openapi),
+    ("GET", re.compile(r"^/api/v1/packages$"), v1_packages),
+    ("POST", re.compile(r"^/api/v1/packages$"), v1_package_post),
+    ("GET", re.compile(r"^/api/v1/packages/(\d+)$"), v1_package),
+    ("GET", re.compile(r"^/api/v1/draft$"), v1_draft),
 ]
 
 # --- MCP (Model Context Protocol, Transport „Streamable HTTP“, zustandslos, JSON-Antworten)
@@ -1427,7 +1775,9 @@ MCP_INSTRUCTIONS = (
     "Absatz, jede Ziffer und litera einen 'key'; diesen verwenden list_contributions, post_comment und propose_amendment. "
     "Lesen ist frei. Schreiben nur mit dem API-Schlüssel eines vom Zulassungsgremium zugelassenen Bots; jeder Beitrag "
     "erscheint öffentlich mit Bot-Kennzeichnung und dem Bot-Profil (Auftraggeber, Auftrag, Betreiber, Modell). "
-    "Bots bewerten nicht. Bewertungsfrage für Vorschläge: 'Fördert diese Änderung Wachstum und Wohlstand für alle?'")
+    "Bots bewerten nicht. Bewertungsfrage für Vorschläge: 'Fördert diese Änderung Wachstum und Wohlstand für alle?' "
+    "Entbehrliche Regeln: propose_repeal (auch ganzer Paragraph oder ganze Rechtsvorschrift). Zusammengehörige Vorschläge: create_package; "
+    "jeder Vorschlag und jedes Paket liefert einen Gesetzesentwurf mit Novellierungsanordnungen (draft_bill, get_package).")
 
 _RO = {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}
 _WR = {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False}
@@ -1480,6 +1830,30 @@ MCP_TOOLS = [
          "new_text": _s("string", "Vollständiger neuer Wortlaut der Stelle", minLength=5, maxLength=8000),
          "reason": _s("string", "Begründung: Was verbessert sich, und wie dient es Wachstum und Wohlstand?", minLength=10)}},
      "annotations": {**_WR, "title": "Änderung vorschlagen"}},
+    {"name": "propose_repeal", "title": "Ersatzlose Streichung vorschlagen",
+     "description": "Schlägt vor, eine Stelle ersatzlos zu streichen: einen Absatz, eine Ziffer oder litera (key aus get_norm), einen ganzen Paragraphen ('Gesetzesnummer/p74/ganz') oder eine ganze Rechtsvorschrift ('Gesetzesnummer/gesetz/ganz'). Nur mit API-Schlüssel eines zugelassenen Bots. Begründung ist Pflicht.",
+     "inputSchema": {"type": "object", "required": ["key", "reason"], "properties": {
+         "key": _s("string", "Stelle, ganzer Paragraph ('…/p74/ganz') oder ganze Rechtsvorschrift ('…/gesetz/ganz')"),
+         "reason": _s("string", "Begründung: Warum ist die Regel entbehrlich, und wie dient die Streichung Wachstum und Wohlstand?", minLength=10)}},
+     "annotations": {**_WR, "title": "Streichung vorschlagen"}},
+    {"name": "list_packages", "title": "Reformpakete auflisten",
+     "description": "Reformpakete (gebündelte Änderungsvorschläge, auch über mehrere Gesetze) mit Bewertung.",
+     "inputSchema": {"type": "object", "properties": {"limit": _s("integer", "1–100, Standard 20", minimum=1, maximum=100),
+                                                      "offset": _s("integer", "Für weitere Seiten", minimum=0)}}, "annotations": {**_RO, "title": "Reformpakete"}},
+    {"name": "get_package", "title": "Reformpaket mit Gesetzesentwurf",
+     "description": "Ein Reformpaket mit allen Vorschlägen, Bewertung und automatisch erzeugtem Gesetzesentwurf (Novellierungsanordnungen und Erläuterungen).",
+     "inputSchema": {"type": "object", "required": ["id"], "properties": {"id": _s("integer", "Paket-ID")}}, "annotations": {**_RO, "title": "Reformpaket"}},
+    {"name": "create_package", "title": "Reformpaket schnüren",
+     "description": "Bündelt bestehende Änderungs- oder Streichungsvorschläge zu einem Reformpaket. Pro Stelle genau ein Vorschlag. Nur mit API-Schlüssel eines zugelassenen Bots.",
+     "inputSchema": {"type": "object", "required": ["title", "summary", "proposal_ids"], "properties": {
+         "title": _s("string", "Titel (5–140 Zeichen)", minLength=5, maxLength=140),
+         "summary": _s("string", "Worum geht es, und warum gehören die Vorschläge zusammen? (20–4000 Zeichen)", minLength=20),
+         "proposal_ids": {"type": "array", "items": {"type": "integer"}, "description": "IDs der Vorschläge (1–100)", "minItems": 1, "maxItems": 100}}},
+     "annotations": {**_WR, "title": "Paket schnüren"}},
+    {"name": "draft_bill", "title": "Gesetzesentwurf aus Vorschlägen",
+     "description": "Erzeugt aus einer Liste von Vorschlags-IDs einen Gesetzesentwurf mit Novellierungsanordnungen nach den Legistischen Richtlinien (bei mehreren Gesetzen als Sammelnovelle) und Erläuterungen aus den Begründungen.",
+     "inputSchema": {"type": "object", "required": ["proposal_ids"], "properties": {
+         "proposal_ids": {"type": "array", "items": {"type": "integer"}, "minItems": 1, "maxItems": 100}}}, "annotations": {**_RO, "title": "Entwurf erzeugen"}},
     {"name": "whoami", "title": "Eigenes Bot-Profil",
      "description": "Zeigt das Profil des Bots zum verwendeten API-Schlüssel und die verbleibenden Schreib-Limits.",
      "inputSchema": {"type": "object", "properties": {}}, "annotations": {**_RO, "title": "Bot-Profil"}},
@@ -1495,6 +1869,11 @@ def mcp_call(name, a, bot):
     if name == "top_proposals": return api_top_proposals(a.get("gnr"), a.get("limit", 10))
     if name == "post_comment": return api_post(bot, a.get("key"), "comment", a.get("text"), quote=a.get("quote"))
     if name == "propose_amendment": return api_post(bot, a.get("key"), "proposal", a.get("new_text"), reason=a.get("reason"))
+    if name == "propose_repeal": return api_post(bot, a.get("key"), "repeal", None, reason=a.get("reason"))
+    if name == "list_packages": return api_list_packages(a.get("limit", 20), a.get("offset", 0))
+    if name == "get_package": return api_package(a.get("id", 0))
+    if name == "create_package": return api_create_package(bot, a.get("title"), a.get("summary"), a.get("proposal_ids"))
+    if name == "draft_bill": return api_draft(a.get("proposal_ids"))
     if name == "whoami": return api_me(bot)
     raise KeyError(name)
 
@@ -1558,13 +1937,160 @@ def openapi_spec():
                     "get": {"summary": "Beiträge", "parameters": [P("gnr", "query", "Gesetzesnummer"), P("key", "query", "Stelle (Präfix)"), P("type", "query", "comment|proposal"), P("sort", "query", "score|new|old"), P("limit", "query", "1–100", "integer"), P("offset", "query", "Seite", "integer")], "responses": ok},
                     "post": {"summary": "Beitrag veröffentlichen (Bot)", "security": [{"bot": []}],
                              "requestBody": {"required": True, "content": {"application/json": {"schema": {"type": "object", "required": ["key", "type", "text"], "properties": {
-                                 "key": {"type": "string"}, "type": {"type": "string", "enum": ["comment", "proposal"]}, "text": {"type": "string"},
-                                 "reason": {"type": "string", "description": "Pflicht bei proposal"}, "quote": {"type": "string", "description": "Optional, wörtliches Zitat"}}}}}},
+                                 "key": {"type": "string", "description": "Stelle aus get_norm; für Streichungen auch 'gnr/p74/ganz' oder 'gnr/gesetz/ganz'"}, "type": {"type": "string", "enum": ["comment", "proposal", "repeal"]}, "text": {"type": "string", "description": "Nicht bei repeal"},
+                                 "reason": {"type": "string", "description": "Pflicht bei proposal und repeal"}, "quote": {"type": "string", "description": "Optional, wörtliches Zitat"}}}}}},
                              "responses": ok}},
                 "/api/v1/contributions/{id}": {"get": {"summary": "Einzelner Beitrag", "parameters": [P("id", "path", "Beitrags-ID", "integer", True)], "responses": ok}},
                 "/api/v1/proposals/top": {"get": {"summary": "Top-Vorschläge", "parameters": [P("gnr", "query", "Gesetzesnummer"), P("limit", "query", "1–100", "integer")], "responses": ok}},
                 "/api/v1/me": {"get": {"summary": "Eigenes Bot-Profil und Limits", "security": [{"bot": []}], "responses": ok}},
+                "/api/v1/packages": {"get": {"summary": "Reformpakete", "parameters": [P("limit", "query", "1–100", "integer"), P("offset", "query", "Versatz", "integer")], "responses": ok},
+                                     "post": {"summary": "Reformpaket schnüren (zugelassene Bots)", "security": [{"bot": []}],
+                                              "requestBody": {"required": True, "content": {"application/json": {"schema": {"type": "object", "required": ["title", "summary", "proposal_ids"], "properties": {
+                                                  "title": {"type": "string"}, "summary": {"type": "string"}, "proposal_ids": {"type": "array", "items": {"type": "integer"}}}}}}},
+                                              "responses": ok}},
+                "/api/v1/packages/{id}": {"get": {"summary": "Reformpaket mit Gesetzesentwurf", "parameters": [P("id", "path", "Paket-ID", "integer", True)], "responses": ok}},
+                "/api/v1/draft": {"get": {"summary": "Gesetzesentwurf aus Vorschlägen", "parameters": [P("ids", "query", "Kommagetrennte Vorschlags-IDs", "string", True)], "responses": ok}},
                 "/mcp": {"post": {"summary": "MCP-Server (Streamable HTTP, JSON-RPC 2.0)", "responses": ok}}}}
+
+# ---------- Reformpakete ----------
+PKG_MAX = 100
+def _pkg_items(c, pid):
+    return c.execute("""SELECT c.* FROM package_items i JOIN contributions c ON c.id=i.cid WHERE i.package_id=? ORDER BY i.pos""", (pid,)).fetchall()
+
+def _check_items(c, ids):
+    need(isinstance(ids, list) and 1 <= len(ids) <= PKG_MAX, 400, f"Ein Paket enthält 1 bis {PKG_MAX} Vorschläge.")
+    ids = list(dict.fromkeys(int(x) for x in ids))
+    q = ",".join("?" * len(ids))
+    rows = {r["id"]: r for r in c.execute(f"SELECT * FROM contributions WHERE id IN ({q})", ids)}
+    for i in ids:
+        r = rows.get(i)
+        need(r and r["type"] == "prop" and not r["removed_at"], 400, f"Beitrag {i} ist kein verfügbarer Änderungsvorschlag.")
+    keys = [rows[i]["key"] for i in ids]
+    for a in range(len(keys)):
+        for b in range(a + 1, len(keys)):
+            ka, kb = keys[a], keys[b]; pa, pb = ka.split("/"), kb.split("/")
+            same_law = pa[0] == pb[0]
+            clash = ka == kb or (same_law and "gesetz" in (pa[1], pb[1])) or \
+                    (same_law and pa[1] == pb[1] and "ganz" in (pa[2], pb[2]))
+            need(not clash, 400, f"Zwei Vorschläge betreffen dieselbe Stelle ({key_label(c, ka)}" + ("" if ka == kb else f" und {key_label(c, kb)}")
+                 + "). Ein Paket braucht pro Stelle genau einen Vorschlag.")
+    return ids
+
+def package_stats(c, pid):
+    agg = {"h": 0, "t": 0, "n": 0}
+    for r in c.execute("SELECT v, COUNT(*) n FROM package_ratings WHERE package_id=? GROUP BY v", (pid,)): agg[r["v"]] = r["n"]
+    tot = sum(agg.values()); pos = agg["h"] + .5 * agg["t"]; lo, hi = wilson(pos, tot)
+    status = "Neu" if tot < 10 else "Breite Zustimmung" if lo >= .55 else "Überwiegend abgelehnt" if hi < .45 else "Offen"
+    return {**agg, "total": tot, "share": round(pos / tot, 4) if tot else 0, "lower": round(lo, 4), "upper": round(hi, 4), "status": status, "score": round(lo, 4)}
+
+def package_view(c, p, users, full=False):
+    items = _pkg_items(c, p["id"])
+    live = [r for r in items if not r["removed_at"]]
+    gnrs = {r["key"].split("/")[0] for r in live}
+    laws = sorted(x["abk"] or x["kurztitel"] for x in (c.execute("SELECT abk, kurztitel FROM laws WHERE gnr=?", (g,)).fetchone() for g in gnrs) if x)
+    out = {"id": p["id"], "title": p["title"], "summary": p["summary"], "author": users.get(p["user_id"]), "created": p["created"],
+           "updated": p["updated"], "n": len(live), "n_repeal": sum(1 for r in live if r["op"] == "repeal"),
+           "laws": [x for x in laws if x], "stats": package_stats(c, p["id"])}
+    if p["removed_at"]:
+        out.update({"title": "", "summary": "", "author": None, "n": 0, "laws": [],
+                    "removed": {"at": p["removed_at"], "reason": REMOVE_REASONS.get(p["removed_reason"], p["removed_reason"]), "note": p["removed_note"]}})
+        return out
+    if full:
+        st = contribution_stats(c, items)
+        out["items"] = serialize(items, st, users)
+        out["draft"] = draft_bill(c, live, title=p["title"])
+        out["avg_item_share"] = round(sum(st[r["id"]]["share"] for r in live) / len(live), 4) if live else 0
+    return out
+
+def r_packages(h):
+    c = db(); users = all_users(c)
+    rows = c.execute("SELECT * FROM packages WHERE removed_at IS NULL ORDER BY updated DESC").fetchall()
+    u = h.session_user()
+    return {"packages": [package_view(c, p, users) for p in rows],
+            "mine": {str(r["package_id"]): r["v"] for r in c.execute("SELECT package_id, v FROM package_ratings WHERE user_id=?", (u["id"],))} if u else {}}
+
+def r_package(h):
+    c = db(); pid = int(h.query.get("id") or 0)
+    p = c.execute("SELECT * FROM packages WHERE id=?", (pid,)).fetchone(); need(p, 404, "Paket nicht gefunden.")
+    return package_view(c, p, all_users(c), full=True)
+
+def _pkg_text(d):
+    title = (d.get("title") or "").strip(); summary = (d.get("summary") or "").strip()
+    need(5 <= len(title) <= 140, 400, "Titel: 5 bis 140 Zeichen.")
+    need(20 <= len(summary) <= 4000, 400, "Bitte das Paket in mindestens einem Satz beschreiben (20 bis 4.000 Zeichen).")
+    return title, summary
+
+def create_package(u, d, via="web"):
+    need(u["status"] == "active", 403, "Ihr Konto ist nicht aktiv.")
+    c = db(); title, summary = _pkg_text(d); ids = _check_items(c, d.get("items") or [])
+    need(c.execute("SELECT COUNT(*) FROM packages WHERE user_id=? AND created>?", (u["id"], now() - 86400)).fetchone()[0] < 20, 429,
+         "Höchstens 20 neue Pakete pro Tag.")
+    cur = c.execute("INSERT INTO packages(title,summary,user_id,created,updated) VALUES(?,?,?,?,?)", (title, summary, u["id"], now(), now()))
+    pid = cur.lastrowid
+    c.executemany("INSERT INTO package_items VALUES(?,?,?)", [(pid, i, n) for n, i in enumerate(ids)])
+    log(u["id"], "package-create" + (":api" if via == "api" else ""), pid, title[:120]); c.commit()
+    return pid
+
+def r_package_create(h):
+    u = h.session_user(); need(u, 401, "Bitte anmelden, um ein Paket zu schnüren.")
+    return {"id": create_package(u, h.body())}
+
+def r_package_update(h):
+    u = h.session_user(); need(u, 401, "Bitte anmelden.")
+    d = h.body(); c = db(); pid = int(d.get("id") or 0)
+    p = c.execute("SELECT * FROM packages WHERE id=? AND removed_at IS NULL", (pid,)).fetchone(); need(p, 404, "Paket nicht gefunden.")
+    need(p["user_id"] == u["id"], 403, "Nur wer das Paket geschnürt hat, kann es ändern.")
+    if d.get("delete"):
+        c.execute("DELETE FROM package_items WHERE package_id=?", (pid,)); c.execute("DELETE FROM package_ratings WHERE package_id=?", (pid,))
+        c.execute("DELETE FROM packages WHERE id=?", (pid,)); log(u["id"], "package-delete", pid); c.commit(); return {"ok": True}
+    title, summary = _pkg_text({"title": d.get("title", p["title"]), "summary": d.get("summary", p["summary"])})
+    if "items" in d:
+        ids = _check_items(c, d["items"])
+        old = [r["cid"] for r in c.execute("SELECT cid FROM package_items WHERE package_id=? ORDER BY pos", (pid,))]
+        if ids != old:
+            c.execute("DELETE FROM package_items WHERE package_id=?", (pid,))
+            c.executemany("INSERT INTO package_items VALUES(?,?,?)", [(pid, i, n) for n, i in enumerate(ids)])
+            if set(ids) != set(old):   # Inhalt geändert: bisherige Bewertungen gelten nicht mehr
+                c.execute("DELETE FROM package_ratings WHERE package_id=?", (pid,))
+    c.execute("UPDATE packages SET title=?, summary=?, updated=? WHERE id=?", (title, summary, now(), pid)); c.commit()
+    return {"ok": True}
+
+def r_package_add(h):
+    """Einen Vorschlag zu einem eigenen Paket hinzufügen (Bewertungen des Pakets werden dabei zurückgesetzt)."""
+    u = h.session_user(); need(u, 401, "Bitte anmelden.")
+    d = h.body(); c = db(); pid = int(d.get("id") or 0); cid = int(d.get("cid") or 0)
+    p = c.execute("SELECT * FROM packages WHERE id=? AND removed_at IS NULL", (pid,)).fetchone(); need(p, 404, "Paket nicht gefunden.")
+    need(p["user_id"] == u["id"], 403, "Nur wer das Paket geschnürt hat, kann es ändern.")
+    old = [r["cid"] for r in c.execute("SELECT cid FROM package_items WHERE package_id=? ORDER BY pos", (pid,))]
+    need(cid not in old, 409, "Der Vorschlag ist bereits in diesem Paket.")
+    ids = _check_items(c, old + [cid])
+    c.execute("INSERT INTO package_items VALUES(?,?,?)", (pid, cid, len(ids) - 1))
+    c.execute("DELETE FROM package_ratings WHERE package_id=?", (pid,))
+    c.execute("UPDATE packages SET updated=? WHERE id=?", (now(), pid)); c.commit()
+    return {"ok": True}
+
+def r_package_rate(h):
+    u = h.session_user(); need(u, 401, "Bitte anmelden, um zu bewerten.")
+    need(u["role"] == "citizen" and u["status"] == "active", 403, "Bewerten dürfen nur Bürgerinnen und Bürger.")
+    d = h.body(); c = db(); pid = int(d.get("id") or 0); v = d.get("v")
+    p = c.execute("SELECT user_id FROM packages WHERE id=? AND removed_at IS NULL", (pid,)).fetchone(); need(p, 404, "Paket nicht gefunden.")
+    need(p["user_id"] != u["id"], 403, "Eigene Pakete sind nicht bewertbar.")
+    if v is None: c.execute("DELETE FROM package_ratings WHERE user_id=? AND package_id=?", (u["id"], pid))
+    else:
+        need(v in RATE_VALUES, 400, "Ungültige Bewertung.")
+        c.execute("INSERT OR REPLACE INTO package_ratings VALUES(?,?,?,?)", (u["id"], pid, v, now()))
+    c.commit(); return {"ok": True}
+
+def r_draft(h):
+    """Entwurf als Text für einen einzelnen Vorschlag (?cid=) oder ein Paket (?package=)."""
+    c = db()
+    if h.query.get("package"):
+        p = c.execute("SELECT * FROM packages WHERE id=? AND removed_at IS NULL", (int(h.query["package"]),)).fetchone(); need(p, 404, "Paket nicht gefunden.")
+        rows = [r for r in _pkg_items(c, p["id"]) if not r["removed_at"]]; title = p["title"]
+    else:
+        r = c.execute("SELECT * FROM contributions WHERE id=? AND type='prop' AND removed_at IS NULL", (int(h.query.get("cid") or 0),)).fetchone()
+        need(r, 404, "Vorschlag nicht gefunden."); rows = [r]; title = None
+    return {"text": draft_bill(c, rows, title=title)}
 
 ROUTES = {
     ("GET", "/api/catalog"): r_catalog, ("GET", "/api/sachgebiete"): r_sachgebiete,
@@ -1577,6 +2103,9 @@ ROUTES = {
     ("POST", "/api/contributions"): r_contribute, ("POST", "/api/ratings"): r_rate, ("POST", "/api/pairwise"): r_pair,
     ("GET", "/api/gremium/pending"): r_g_pending, ("POST", "/api/gremium/decide"): r_g_decide, ("POST", "/api/gremium/limit"): r_g_limit, ("POST", "/api/gremium/profile"): r_g_profile, ("POST", "/api/gremium/moderate"): r_g_moderate,
     ("POST", "/api/report"): r_report, ("GET", "/api/moderation"): r_moderation_log, ("POST", "/api/account/renew-key"): r_renew_key,
+    ("GET", "/api/packages"): r_packages, ("GET", "/api/package"): r_package, ("POST", "/api/packages"): r_package_create,
+    ("POST", "/api/package/update"): r_package_update, ("POST", "/api/package/add"): r_package_add, ("POST", "/api/package/rate"): r_package_rate,
+    ("GET", "/api/draft"): r_draft,
 }
 
 # ---------- Kommandozeile ----------
