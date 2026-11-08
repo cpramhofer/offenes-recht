@@ -71,7 +71,8 @@ function go(hash){ if (location.hash !== hash) location.hash = hash; else route(
 async function route(){
   const p = location.hash.replace(/^#\/?/, "").split("/").filter(Boolean);
   S.compare = false;
-  if (["impressum","datenschutz","reset","api","projekt","moderation","paket","zahlen"].includes(p[0])){
+  if (["impressum","datenschutz","reset","api","projekt","moderation","paket","zahlen","konto"].includes(p[0])){
+    if (p[0]==="konto"){ S.kontoTab = p[1]==="einstellungen" ? "einst" : "aktiv"; if (S.panel==="account") S.panel = "default"; await loadAll().catch(()=>{}); if (S.user) await loadActivity(); }
     if (p[0]==="zahlen"){ try { S.zahlen = await api("/api/zahlen"); } catch(e){ S.zahlen = {error:e.message}; } }
     if (p[0]==="moderation"){ try { S.modlog = await api("/api/moderation"); } catch(e){ S.modlog = {removed:[], stats:{}}; } }
     if (p[0]==="paket"){ try { S.pkg = await api("/api/package?id="+(+p[1]||0)); } catch(e){ S.pkg = {error:e.message}; } }
@@ -636,6 +637,7 @@ async function renderBots(panel){
 }
 function renderAccount(panel){
   const u = S.user; if (!u){ S.panel="default"; return renderPanel(); }
+  S.panel = S.mode==="law" ? "anchor" : "default"; go("#/konto"); return;
   let bot = "";
   if (u.role==="bot"){
     const st = u.status==="active" ? `<span class="pill s-konsens">zugelassen</span>` : u.status==="pending" ? `<span class="pill pend">wartet auf Zulassung</span>` : `<span class="pill s-umstritten">nicht zugelassen</span>`;
@@ -721,10 +723,109 @@ async function renderGremium(panel){
     <div class="form">${backBtn()}</div>`;
 }
 
+// ---- Mein Konto: eigene Seite mit „Aktivitäten“ und „Einstellungen“
+const VOTE = {h:"Ja", t:"Teilweise", n:"Nein"};
+async function loadActivity(){ try { S.act = await api("/api/account/activity"); } catch(e){ S.act = {error:e.message}; } }
+function kontoHead(u){
+  const st = u.role==="bot" ? (u.status==="active" ? `<span class="pill s-konsens">zugelassen</span>` : u.status==="pending" ? `<span class="pill pend">wartet auf Zulassung</span>` : `<span class="pill s-umstritten">nicht zugelassen</span>`)
+    : u.role==="org" ? (u.verified ? `<span class="pill s-konsens">geprüft</span>` : `<span class="pill pend">noch nicht geprüft</span>`) : `<span class="pill s-neu">noch nicht über ID Austria verifiziert</span>`;
+  const tab = S.kontoTab;
+  return `<div class="lbl">Mein Konto</div><h1>${esc(u.name)}</h1>
+    <div class="kmeta"><span class="pill ${u.role==="bot"?"bot":"role"}">${ROLE_NAMES[u.role]}</span>${st}${u.gremium?`<span class="pill pkg">Zulassungsgremium</span>`:""}${S.act && S.act.member_since ? `<span class="why">dabei seit ${fmtDate(S.act.member_since)}</span>` : ""}</div>
+    <nav class="ktabs" aria-label="Bereiche"><a href="#/konto" aria-current="${tab==="aktiv"}">Aktivitäten</a><a href="#/konto/einstellungen" aria-current="${tab==="einst"}">Einstellungen</a></nav>`;
+}
+function tile(n, l, sub){ return `<div><b>${n}</b><span>${l}</span>${sub?`<span class="sub">${sub}</span>`:""}</div>`; }
+function renderKontoAktiv(u){
+  const a = S.act;
+  if (!a) return `<div class="empty">Lade …</div>`;
+  if (a.error) return `<div class="empty">${esc(a.error)}</div>`;
+  const s = a.stats, sec = S.kontoSec || "beitraege";
+  const news = [...(a.own_news||[]).map(t => `<li>${esc(t)}</li>`), ...a.news.map(n => `<li><a href="${esc(n.url)}">${esc(n.title)}</a><div class="why">${n.lines.map(esc).join("<br>")}</div></li>`)];
+  let html = `<section class="kbox news"><div class="khead"><h2>Neu seit Ihrem letzten Besuch</h2><span class="why">${fmtDate(a.since)}</span></div>
+    ${news.length ? `<ul class="newslist">${news.join("")}</ul><button class="btn ghost" id="seenbtn">Als gelesen markieren</button>` : `<p class="why">Nichts Neues zu Ihren Beiträgen und den Inhalten, denen Sie folgen.</p>`}</section>
+    <div class="hero ktiles">
+      ${tile(nf(s.contributions), "Beiträge", `${nf(s.proposals)} Vorschläge${s.repeals?`, davon ${nf(s.repeals)} Streichungen`:""} · ${nf(s.comments)} Kommentare`)}
+      ${tile(nf(s.votes_received), "Stimmen erhalten", s.approval_avg!==null ? `Ø ${pct(s.approval_avg)} % Zustimmung zu Ihren Vorschlägen` : "Noch keine Stimmen")}
+      ${tile(nf(s.consensus), "mit breiter Zustimmung", `in ${nf(s.laws)} ${s.laws===1?"Rechtsvorschrift":"Rechtsvorschriften"}`)}
+      ${u.role==="citizen" ? tile(nf(s.ratings), "Bewertungen abgegeben", `${s.rating_values.h} Ja · ${s.rating_values.t} Teilweise · ${s.rating_values.n} Nein`) : tile(nf(s.packages), "Reformpakete", "")}
+    </div>
+    ${a.top_laws.length ? `<div class="kfocus"><span class="lbl">Ihre Schwerpunkte</span>${a.top_laws.map(l => `<button class="chip ${S.kontoLaw===l.gnr?"on":""}" data-klaw="${l.gnr}">${esc(l.name)} <b>${l.n}</b></button>`).join("")}${S.kontoLaw?`<button class="linkbtn subtle" data-klaw="">alle</button>`:""}</div>` : ""}
+    <div class="seg ksec" role="group" aria-label="Aktivität">${[["beitraege",`Beiträge (${s.contributions})`],["pakete",`Pakete (${s.packages})`],...(u.role==="citizen"?[["bewertungen",`Bewertungen (${s.ratings})`]]:[]),...(u.role!=="bot"?[["gefolgt",`Gefolgt (${s.follows})`]]:[])].map(([k,l]) => `<button data-ksec="${k}" aria-pressed="${sec===k}">${l}</button>`).join("")}</div>`;
+  if (sec==="beitraege"){
+    const f = S.kontoFilter || "all", so = S.kontoSort || "new";
+    let list = a.contributions.filter(c => (!S.kontoLaw || c.key.startsWith(S.kontoLaw+"/")) &&
+      (f==="all" ? !c.removed : f==="removed" ? c.removed : !c.removed && c.type===f));
+    list.sort(so==="best" ? (x,y) => y.stats.score - x.stats.score : so==="votes" ? (x,y) => y.stats.total - x.stats.total : (x,y) => y.created - x.created);
+    html += `<div class="ktools"><div class="seg" role="group" aria-label="Filter">${[["all","Alle"],["prop","Vorschläge"],["com","Kommentare"],["removed",`Entfernt (${s.removed})`]].map(([k,l]) => `<button data-kfilter="${k}" aria-pressed="${f===k}">${l}</button>`).join("")}</div>
+      <select id="ksort" aria-label="Sortierung"><option value="new">Neueste zuerst</option><option value="best" ${so==="best"?"selected":""}>Höchste gesicherte Zustimmung</option><option value="votes" ${so==="votes"?"selected":""}>Meiste Stimmen</option></select></div>
+      <div class="list klist">${list.length ? list.map(c => `<div class="kitem">${cardHtml(c, {showAddr:true, compact:true})}<div class="why kfoot">${fmtDate(c.created)}${c.via==="api"?" · über API":""}${c.rivals?` · ${c.rivals} ${c.rivals===1?"konkurrierender Vorschlag":"konkurrierende Vorschläge"} anderer an dieser Stelle`:""} · <a href="#/g/${esc(c.key)}">zur Stelle</a>${!c.removed ? ` · ${shareBtn("/v/"+c.id)}` : ""}</div></div>`).join("") : `<div class="empty">${f==="removed" ? "Kein Beitrag wurde entfernt." : "Noch keine Beiträge. Wählen Sie eine Rechtsvorschrift, markieren Sie eine Stelle und schreiben Sie den ersten."}</div>`}</div>`;
+  } else if (sec==="pakete"){
+    html += a.packages.length ? `<div class="pgrid">${a.packages.map(pkgCard).join("")}</div>` : `<div class="empty">Noch keine Reformpakete. Ein Paket schnüren Sie über „Zu Paket“ an einem Vorschlag.</div>`;
+  } else if (sec==="bewertungen"){
+    const rows = [...a.ratings.map(r => ({v:r.v, at:r.at, html:`<a href="#/g/${esc(r.c.key)}">${esc(r.c.where)}</a> <span class="why">${r.c.removed ? "Beitrag entfernt" : (r.c.type==="com" ? "Kommentar" : isRepeal(r.c) ? "Streichung" : "Vorschlag") + " · " + r.c.stats.status + (r.c.stats.total ? ` · ${pct(r.c.stats.share)} % Zustimmung` : "")}</span>`})),
+                  ...a.package_ratings.map(r => ({v:r.v, at:r.at, html:`<a href="#/paket/${r.package.id}">Paket „${esc(r.package.title)}“</a> <span class="why">${r.package.stats.status}</span>`}))].sort((x,y) => y.at - x.at);
+    html += rows.length ? `<p class="why">Ihre Bewertungen sind nie öffentlich, nur als Summe. Ändern oder zurücknehmen können Sie sie an der jeweiligen Stelle.</p>
+      <table class="dt ktable"><thead><tr><th>Ihre Stimme</th><th>Wozu</th><th>Wann</th></tr></thead><tbody>${rows.map(r => `<tr><td><span class="pill vote-${r.v}">${VOTE[r.v]}</span></td><td>${r.html}</td><td class="num">${fmtDate(r.at)}</td></tr>`).join("")}</tbody></table>`
+      : `<div class="empty">Noch keine Bewertungen abgegeben.</div>`;
+  } else {
+    html += (S.followList||[]).length ? `<p class="why">Neuigkeiten dazu kommen ${({daily:"täglich",weekly:"wöchentlich",off:"nicht"})[S.notify||"daily"]} per E-Mail. Ändern unter <a href="#/konto/einstellungen">Einstellungen</a>.</p>
+      <ul class="reflist kfollow">${S.followList.map(f => `<li><span class="pill pkg">${({law:"Gesetz",c:"Beitrag",pkg:"Paket"})[f.kind]}</span> <a href="${esc(f.url)}">${esc(f.label)}</a> <span class="why">seit ${fmtDate(f.since)}</span> <button class="linkbtn subtle" data-follow="${f.kind}:${esc(f.ref)}">Nicht mehr folgen</button></li>`).join("")}</ul>`
+      : `<div class="empty">Noch nichts. „Folgen“ gibt es bei jedem Gesetz, Entwurf, Beitrag und Paket.</div>`;
+  }
+  return html;
+}
+function renderKontoEinst(u){
+  let bot = "";
+  if (u.role==="bot"){
+    bot = `<section class="kbox"><h2>Zulassung und API-Zugang</h2>
+      <dl class="botbox"><dt>Auftraggeber</dt><dd>${esc(u.bot.principal)}</dd><dt>Auftrag</dt><dd>${esc(u.bot.mandate)}</dd><dt>Betreiber</dt><dd>${esc(u.bot.operator)}</dd><dt>Modell</dt><dd>${esc(u.bot.model)}</dd></dl>
+      <p class="why">Profil und Name ändert das Zulassungsgremium, weil sie Teil der Zulassung sind.</p>
+      ${u.api_key_once ? `<div class="lbl">Ihr API-Schlüssel (wird nur einmal angezeigt)</div><div class="keybox">${esc(u.api_key_once)}</div><button class="btn" id="ackkey">Schlüssel gesichert</button>` : ""}
+      ${u.status==="active" && !u.api_key_once ? `<details class="botd"><summary>API-Schlüssel erneuern</summary><form class="modform" id="renewform">
+        <div class="why">Der bisherige Schlüssel wird sofort ungültig. Der neue erscheint einmal hier.</div>
+        <label class="lbl" for="rkpw">Passwort zur Bestätigung</label><input id="rkpw" type="password" autocomplete="current-password">
+        <div class="row"><button class="btn" type="submit">Neuen Schlüssel erzeugen</button></div></form></details>` : ""}
+      ${u.status==="active" ? `<div class="lbl">MCP-Server</div><div class="keybox">${esc(location.origin)}/mcp</div><div class="why">Mit dem Schlüssel als „Authorization: Bearer …“. <a href="#/api">Anleitung API &amp; MCP</a></div>` : `<div class="why">Nach der Zulassung: <a href="#/api">Anleitung API &amp; MCP</a>.</div>`}</section>`;
+  }
+  const n = (S.act && S.act.stats) ? S.act.stats.contributions : 0;
+  return `<div class="kgrid">
+    <section class="kbox"><h2>Profil</h2>
+      ${u.role!=="bot" ? `<form class="form" id="nameform" novalidate style="padding:0"><label class="lbl" for="kname">Angezeigter Name</label><input id="kname" maxlength="80" value="${esc(u.name)}">
+        <div class="why">Steht öffentlich bei Ihren Beiträgen. Ein Pseudonym ist erlaubt.</div><div class="row"><button class="btn ghost" type="submit">Speichern</button></div></form>` : `<div class="lbl">Name</div><p>${esc(u.name)}</p>`}
+      <div class="lbl">E-Mail-Adresse</div><p>${esc(u.email)} <span class="why">· nicht öffentlich</span></p>
+      <div class="lbl">Kontoart</div><p>${ROLE_NAMES[u.role]}${u.role==="org"?" · "+esc(u.register||""):""}${u.role==="citizen"?` <span class="why">· Verifizierung über ID Austria folgt</span>`:""}</p>
+    </section>
+    ${bot}
+    ${u.role!=="bot" ? `<section class="kbox"><h2>Benachrichtigungen</h2>
+      <p class="why">Zu Gesetzen, Entwürfen, Beiträgen und Paketen, denen Sie folgen: neue Beiträge, Statuswechsel, neue Fassungen im RIS, ablaufende Begutachtungsfristen. Eine E-Mail nur, wenn es Neues gibt.</p>
+      <div class="seg" role="group" aria-label="Häufigkeit">${[["daily","Täglich"],["weekly","Wöchentlich"],["off","Aus"]].map(([k,l]) => `<button type="button" data-notify="${k}" aria-pressed="${(S.notify||"daily")===k}">${l}</button>`).join("")}</div>
+      <p class="why">${(S.followList||[]).length} gefolgte Inhalte, siehe <a href="#/konto" data-ksecgo="gefolgt">Aktivitäten</a>.</p></section>` : ""}
+    <section class="kbox"><h2>Passwort</h2><form class="form" id="pwform" novalidate style="padding:0">
+      <label class="lbl" for="pwo">Bisheriges Passwort</label><input id="pwo" type="password" autocomplete="current-password">
+      <label class="lbl" for="pwn">Neues Passwort (mindestens 10 Zeichen)</label><input id="pwn" type="password" autocomplete="new-password">
+      <div class="err" id="pwerr" hidden></div><div class="row"><button class="btn ghost" type="submit">Passwort ändern</button></div></form></section>
+    <section class="kbox"><h2>Ihre Daten</h2>
+      <p class="why">Alle Daten, die Offenes Recht zu Ihrem Konto speichert, als Datei: Konto, Beiträge, Bewertungen, Paarvergleiche, Pakete, gefolgte Inhalte, Meldungen (Auskunft nach Art. 15 DSGVO).</p>
+      <div class="row"><button class="btn ghost" id="exportbtn">Daten herunterladen (JSON)</button><a class="linkbtn subtle" href="#/datenschutz">Datenschutzerklärung</a></div></section>
+    <section class="kbox danger"><h2>Konto löschen</h2><form class="form danger" id="delform" novalidate style="padding:0">
+      <p class="why" style="margin:0">Bewertungen, Paarvergleiche und gefolgte Inhalte werden sofort gelöscht. Ihre Beiträge und Pakete bleiben anonymisiert als „Gelöschtes Konto“ stehen, außer Sie kreuzen unten an, dass auch sie gelöscht werden.</p>
+      <label class="consent"><input type="checkbox" id="delc"> <span>Auch ${n===1 ? "meinen Beitrag" : `meine ${n} Beiträge`} und meine Pakete löschen</span></label>
+      <label class="lbl" for="delpw">Passwort zur Bestätigung</label><input id="delpw" type="password" autocomplete="current-password">
+      <label class="consent"><input type="checkbox" id="delok"> <span>Ich will mein Konto endgültig löschen. Das kann nicht rückgängig gemacht werden.</span></label>
+      <div class="err" id="delerr" hidden></div><div class="row"><button class="btn" type="submit">Konto löschen</button></div></form></section>
+  </div>`;
+}
+function renderKonto(){
+  const u = S.user;
+  if (!u) return `<article class="legal doc"><div class="lbl">Mein Konto</div><h1>Bitte anmelden</h1><div class="row" style="display:flex;gap:8px"><button class="btn" data-open="login">Anmelden</button><button class="btn ghost" data-open="register">Registrieren</button></div></article>`;
+  return `<article class="legal doc konto">${kontoHead(u)}${S.kontoTab==="einst" ? renderKontoEinst(u) : renderKontoAktiv(u)}</article>`;
+}
+
 // ---- Rechtliches und Passwort-Link
 function renderPage(){
   const L = LEGAL; let html = "";
-  if (S.page==="impressum") html = `<article class="legal"><div class="lbl">Rechtliches</div><h1>Impressum und Offenlegung</h1>
+  if (S.page==="konto") html = renderKonto();
+  else if (S.page==="impressum") html = `<article class="legal"><div class="lbl">Rechtliches</div><h1>Impressum und Offenlegung</h1>
     <h2>Medieninhaber und Herausgeber</h2><p>${esc(L.name)}<br>${esc(L.ort)}<br>E-Mail: <a href="mailto:${esc(L.mail)}">${esc(L.mail)}</a></p>
     <h2>Offenlegung nach § 25 Mediengesetz</h2><p>Medieninhaber: ${esc(L.name)}, ${esc(L.ort)}.</p>
     <p>Grundlegende Richtung: Unabhängige Plattform, auf der Bürgerinnen und Bürger das österreichische Bundesrecht kommentieren und Verbesserungen vorschlagen.</p>
@@ -1148,7 +1249,7 @@ async function share(path){
 }
 function confirmInline(btn, q){ if (btn.dataset.armed) return true; btn.dataset.armed = "1"; btn.textContent = q; setTimeout(() => { delete btn.dataset.armed; }, 4000); return false; }
 function setPanel(v){ S.panel = v; if (v==="gremium") S.gremium=null; if (v==="bots") S.bots=null; updateSide(); renderPanel(); if (sideOn() && (narrow() || S.mode==="home")) $("panel").scrollIntoView({behavior:"smooth", block:"start"}); }
-async function refresh(){ if (S.mode==="law") await loadState(); await loadAll(); render(); }
+async function refresh(){ if (S.mode==="law") await loadState(); await loadAll(); if (S.page==="konto" && S.user) await loadActivity(); render(); }
 
 // ---- Ereignisse
 let qTimer = null;
@@ -1157,6 +1258,7 @@ document.addEventListener("input", e => {
   if (e.target.id==="tocq"){ S.tocq = e.target.value; const pos = e.target.selectionStart; renderToc(); const n=$("tocq"); n.focus(); n.setSelectionRange(pos,pos); }
 });
 document.addEventListener("click", e => {
+  const ks = e.target.closest("a[data-ksecgo]"); if (ks) S.kontoSec = ks.dataset.ksecgo;
   const n = e.target.closest("a[data-nav]");
   if (n){
     e.preventDefault();
@@ -1181,7 +1283,7 @@ document.addEventListener("click", async e => {
     if (t.dataset.pmode){ S.propMode = t.dataset.pmode; S.propsAll = false; renderHome(); return; }
     if (t.id==="propsall"){ S.propsAll = true; renderHome(); return; }
     if (t.id==="pkgsall"){ S.pkgsAll = true; renderHome(); return; }
-    if (t.dataset.notify){ await api("/api/account/notify", {notify:t.dataset.notify}); S.notify = t.dataset.notify; renderPanel(); toast("Gespeichert"); return; }
+    if (t.dataset.notify){ await api("/api/account/notify", {notify:t.dataset.notify}); S.notify = t.dataset.notify; S.page==="konto" ? renderPage() : renderPanel(); toast("Gespeichert"); return; }
     if (t.id==="draftsall"){ S.draftsAll = true; renderHome(); return; }
     if (t.dataset.follow){
       const [kind, ref] = t.dataset.follow.split(":"), on = !following(kind, ref);
@@ -1189,7 +1291,7 @@ document.addEventListener("click", async e => {
       document.querySelectorAll(`[data-follow="${CSS.escape(t.dataset.follow)}"]`).forEach(b => { b.classList.toggle("on", on); b.setAttribute("aria-pressed", on); b.textContent = on ? "Gefolgt ✓" : "Folgen"; });
       toast(on ? "Sie folgen jetzt. Neuigkeiten kommen als Zusammenfassung per E-Mail." : "Nicht mehr gefolgt");
       try { const f = await api("/api/follows"); S.followList = f.follows; } catch(e){}
-      if (S.panel==="account") renderPanel(); return;
+      if (S.page==="konto"){ await loadActivity(); renderPage(); } else if (S.panel==="account") renderPanel(); return;
     }
     if (t.id==="stellungnahme"){ showDraft(stellungnahme(), "Beiträge als Stellungnahme"); return; }
     if (t.dataset.whole){ if (S.formType!=="del") S.formBefore = S.formType; S.formType = "del"; selectUnit(t.dataset.whole); return; }
@@ -1222,7 +1324,12 @@ document.addEventListener("click", async e => {
     if (t.id==="loginbtn"){ openAuth("login"); return; }
     if (t.id==="regbtn"){ openAuth("register"); return; }
     if (t.id==="logoutbtn"){ await api("/api/logout", {}); S.panel = S.mode==="law"?"anchor":"default"; await refresh(); toast("Abgemeldet"); return; }
-    if (t.id==="acctbtn"){ setPanel("account"); return; }
+    if (t.id==="acctbtn"){ go("#/konto"); return; }
+    if (t.dataset.ksec){ S.kontoSec = t.dataset.ksec; renderPage(); return; }
+    if (t.dataset.kfilter){ S.kontoFilter = t.dataset.kfilter; renderPage(); return; }
+    if (t.dataset.klaw!==undefined){ S.kontoLaw = t.dataset.klaw || null; S.kontoSec = "beitraege"; renderPage(); return; }
+    if (t.id==="seenbtn"){ await api("/api/account/seen", {}); await loadActivity(); renderPage(); toast("Als gelesen markiert"); return; }
+    if (t.id==="exportbtn"){ const j = await api("/api/account/export"); download(`offenes-recht-meine-daten-${new Date().toISOString().slice(0,10)}.json`, JSON.stringify(j, null, 2)); return; }
     if (t.id==="grembtn"){ setPanel("gremium"); return; }
     if (t.id==="botsbtn"){ setPanel("bots"); return; }
     if (t.id==="howbtn"){ go("#/projekt/bewertung"); return; }
@@ -1263,6 +1370,7 @@ document.addEventListener("keydown", e => {
 });
 document.addEventListener("keydown", e => { const u = e.target.closest && e.target.closest(".unit"); if (u && (e.key==="Enter"||e.key===" ")){ e.preventDefault(); selectUnit(u.dataset.key); } });
 document.addEventListener("change", async e => {
+  if (e.target.id==="ksort"){ S.kontoSort = e.target.value; renderPage(); }
   if (e.target.id==="showbots"){ S.showBots = e.target.checked; renderPanel(); }
   if (e.target.id==="fgold"){ S.gold = e.target.checked; const b = document.querySelector(".goldsel"); if (b) b.hidden = !S.gold; }
   if (e.target.name==="pkg"){ const box = e.target.form.querySelector(".newpkg"); if (box) box.hidden = e.target.value!=="new"; }
@@ -1298,7 +1406,7 @@ document.addEventListener("submit", async e => {
       $("auth").close();
       const wasReg = id==="regform";
       await refresh();
-      if (wasReg && S.user.role==="bot"){ setPanel("account"); toast("Antrag eingereicht. Das Gremium entscheidet über die Zulassung."); }
+      if (wasReg && S.user.role==="bot"){ go("#/konto/einstellungen"); toast("Antrag eingereicht. Das Gremium entscheidet über die Zulassung."); }
       else toast(wasReg ? "Konto angelegt. Willkommen!" : "Angemeldet");
     } catch(x){ err.textContent = x.message; err.hidden = false; }
     return;
@@ -1324,6 +1432,11 @@ document.addEventListener("submit", async e => {
     } catch(x){ toast(x.message); }
     return;
   }
+  if (id==="nameform"){
+    try { await api("/api/account/name", {name:v("kname")}); await refresh(); toast("Name gespeichert"); }
+    catch(x){ toast(x.message); }
+    return;
+  }
   if (id==="pkgedit"){
     try { await api("/api/package/update", {id:S.pkg.id, title:v("pkt"), summary:v("pks")}); await reloadPkg(); toast("Gespeichert"); }
     catch(x){ toast(x.message); }
@@ -1343,7 +1456,7 @@ document.addEventListener("submit", async e => {
     return;
   }
   if (id==="renewform"){
-    try { await api("/api/account/renew-key", {password:$("rkpw").value}); await refresh(); setPanel("account"); toast("Neuer Schlüssel erzeugt. Der alte ist ungültig."); }
+    try { await api("/api/account/renew-key", {password:$("rkpw").value}); await refresh(); toast("Neuer Schlüssel erzeugt. Der alte ist ungültig."); }
     catch(x){ toast(x.message); }
     return;
   }

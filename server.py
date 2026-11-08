@@ -146,6 +146,8 @@ def init_db(seed=True):
     if c.execute("SELECT 1 FROM laws WHERE aenderung IS NOT NULL AND n_changes IS NULL LIMIT 1").fetchone():
         c.commit(); recompute_law_metrics(c)
     ucols = [r[1] for r in c.execute("PRAGMA table_info(users)")]
+    if "last_seen" not in ucols:
+        c.execute("ALTER TABLE users ADD COLUMN last_seen INTEGER")       # letzter Besuch von „Mein Konto“ (für „Neu seit …“)
     if "rating_hold" not in ucols:
         c.execute("ALTER TABLE users ADD COLUMN rating_hold INTEGER DEFAULT 0")    # Stimmen vorläufig nicht gezählt (Gremium)
     if "notify" not in ucols:
@@ -906,7 +908,7 @@ def need(cond, code, msg):
     if not cond: raise ApiError(code, msg)
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "OffenesRecht/1.6"
+    server_version = "OffenesRecht/1.7"
 
     def log_message(self, fmt, *a):
         # bewusst ohne IP-Adresse (Datenschutz); Fehlersuche über Pfad und Status
@@ -1556,7 +1558,7 @@ def r_norm(h):
 # mit API-Schlüssel (Authorization: Bearer …). REST und MCP verwenden dieselben Kernfunktionen.
 from urllib.parse import unquote
 
-APP_VERSION = "1.6"
+APP_VERSION = "1.7"
 READ_LIMIT_PER_MIN = int(os.environ.get("OR_API_READ_LIMIT", "120"))
 WRITE_LIMIT_PER_HOUR = int(os.environ.get("OR_API_WRITE_HOUR", "20"))
 WRITE_LIMIT_PER_DAY = int(os.environ.get("OR_API_WRITE_DAY", "100"))
@@ -2724,6 +2726,98 @@ def r_g_hold(h):
         if not ids: log(g["id"], "moderation:anomaly-ok", None, f"Auffälligkeit {fid_} als unbedenklich eingestuft · {note}")
     c.commit(); return {"ok": True}
 
+# ---------- Mein Konto: Aktivitäten, Profil, Datenexport ----------
+def r_activity(h):
+    """Alles, was ein Konto auf der Plattform getan hat, und was sich daran seit dem letzten Besuch geändert hat."""
+    u = h.session_user(); need(u, 401, "Bitte anmelden.")
+    c = db(); users = all_users(c); uid = u["id"]
+    own = c.execute("SELECT * FROM contributions WHERE user_id=? ORDER BY id DESC", (uid,)).fetchall()
+    # Statistik je Stelle braucht die Konkurrenz an derselben Stelle (Paarvergleich)
+    keys = list({r["key"] for r in own})
+    rows = []
+    for i in range(0, len(keys), 400):
+        q = ",".join("?" * len(keys[i:i + 400]))
+        rows += c.execute(f"SELECT * FROM contributions WHERE key IN ({q})", keys[i:i + 400]).fetchall()
+    st = contribution_stats(c, rows) if rows else {}
+    mine = serialize(own, {r["id"]: st.get(r["id"]) or contribution_stats(c, [r])[r["id"]] for r in own}, users)
+    for m in mine:   # konkurrierende Vorschläge anderer an derselben Stelle
+        m["rivals"] = sum(1 for r in rows if r["key"] == m["key"] and r["type"] == "prop" and r["user_id"] != uid and not r["removed_at"])
+    pk = c.execute("SELECT * FROM packages WHERE user_id=? ORDER BY updated DESC", (uid,)).fetchall()
+    packages = [package_view(c, p, users) for p in pk]
+    rated = c.execute("""SELECT r.v, r.created rated_at, c.* FROM ratings r JOIN contributions c ON c.id=r.cid
+                         WHERE r.user_id=? ORDER BY r.created DESC LIMIT 300""", (uid,)).fetchall()
+    rst = contribution_stats(c, rated) if rated else {}
+    ratings = [{"v": r["v"], "at": r["rated_at"], "c": serialize([r], {r["id"]: rst[r["id"]]}, users)[0]} for r in rated]
+    prat = [{"v": r["v"], "at": r["created"], "package": package_view(c, p, users)}
+            for r in c.execute("SELECT * FROM package_ratings WHERE user_id=? ORDER BY created DESC", (uid,)).fetchall()
+            for p in [c.execute("SELECT * FROM packages WHERE id=?", (r["package_id"],)).fetchone()] if p]
+    since = u["last_seen"] or u["created"]
+    news, _ = digest_for(c, u, since)
+    own_news = []
+    nr = c.execute("""SELECT COUNT(*) FROM ratings r JOIN contributions c ON c.id=r.cid WHERE c.user_id=? AND r.created>?
+                      AND r.user_id NOT IN (SELECT id FROM users WHERE rating_hold=1)""", (uid, since)).fetchone()[0]
+    if nr: own_news.append(f"{nr} {'neue Bewertung' if nr == 1 else 'neue Bewertungen'} Ihrer Beiträge.")
+    npr = c.execute("""SELECT COUNT(*) FROM package_ratings r JOIN packages p ON p.id=r.package_id WHERE p.user_id=? AND r.created>?
+                       AND r.user_id NOT IN (SELECT id FROM users WHERE rating_hold=1)""", (uid, since)).fetchone()[0]
+    if npr: own_news.append(f"{npr} {'neue Bewertung' if npr == 1 else 'neue Bewertungen'} Ihrer Reformpakete.")
+    riv = c.execute("""SELECT COUNT(*) FROM contributions o WHERE o.type='prop' AND o.user_id!=? AND o.created>? AND o.removed_at IS NULL
+                       AND o.key IN (SELECT key FROM contributions WHERE user_id=? AND type='prop')""", (uid, since, uid)).fetchone()[0]
+    if riv: own_news.append(f"{riv} {'neuer konkurrierender Vorschlag' if riv == 1 else 'neue konkurrierende Vorschläge'} an Stellen, zu denen Sie etwas vorgeschlagen haben.")
+    rem = c.execute("SELECT COUNT(*) FROM contributions WHERE user_id=? AND removed_at>?", (uid, since)).fetchone()[0]
+    if rem: own_news.append(f"{rem} {'Beitrag wurde' if rem == 1 else 'Beiträge wurden'} von der Moderation entfernt (siehe Beiträge, Filter „Entfernt“).")
+    reports = c.execute("SELECT COUNT(*) FROM reports WHERE user_id=?", (uid,)).fetchone()[0]
+    props = [m for m in mine if m["type"] == "prop" and not m.get("removed")]
+    voted = [m for m in props if m["stats"]["total"]]
+    stats = {"contributions": len(mine), "comments": sum(1 for m in mine if m["type"] == "com"), "proposals": len(props),
+             "repeals": sum(1 for m in props if m["op"] == "repeal"), "removed": sum(1 for m in mine if m.get("removed")),
+             "packages": len(packages), "ratings": len(ratings) + len(prat), "follows": c.execute("SELECT COUNT(*) FROM follows WHERE user_id=?", (uid,)).fetchone()[0],
+             "votes_received": sum(m["stats"]["total"] for m in mine if not m.get("removed")),
+             "approval_avg": round(sum(m["stats"]["share"] for m in voted) / len(voted), 4) if voted else None,
+             "consensus": sum(1 for m in props if m["stats"]["status"] == "Breite Zustimmung"),
+             "laws": len({m["key"].split("/")[0] for m in mine}), "reports": reports,
+             "rating_values": {v: sum(1 for r in ratings if r["v"] == v) for v in "htn"}}
+    laws = {}
+    for m in mine:
+        g = m["key"].split("/")[0]; laws.setdefault(g, 0); laws[g] += 1
+    top_laws = [{"gnr": g, "name": (c.execute("SELECT abk, kurztitel FROM laws WHERE gnr=?", (g,)).fetchone() or {"abk": g, "kurztitel": g})["kurztitel"], "n": n}
+                for g, n in sorted(laws.items(), key=lambda x: -x[1])[:8]]
+    first = min([u["created"]] + [m["created"] for m in mine])
+    return {"stats": stats, "contributions": mine, "packages": packages, "ratings": ratings, "package_ratings": prat,
+            "news": [{"title": t, "url": url.replace(PUBLIC_URL, ""), "lines": l} for t, url, l in news], "own_news": own_news,
+            "since": since, "member_since": u["created"], "first_activity": first, "top_laws": top_laws}
+
+def r_seen(h):
+    u = h.session_user(); need(u, 401, "Bitte anmelden.")
+    db().execute("UPDATE users SET last_seen=? WHERE id=?", (now(), u["id"])); db().commit(); return {"ok": True}
+
+def r_rename(h):
+    u = h.session_user(); need(u, 401, "Bitte anmelden.")
+    need(u["role"] != "bot", 403, "Den Namen eines Bots ändert das Zulassungsgremium, weil er Teil der Zulassung ist.")
+    name = re.sub(r"\s+", " ", (h.body().get("name") or "")).strip()
+    need(2 <= len(name) <= 80, 400, "Name: 2 bis 80 Zeichen.")
+    if name == u["name"]: return {"ok": True}
+    db().execute("UPDATE users SET name=? WHERE id=?", (name, u["id"]))
+    log(u["id"], "account:rename", u["id"], f"{u['name']} → {name}"); db().commit()
+    return {"ok": True}
+
+def r_export(h):
+    """Auskunft nach Art. 15 DSGVO: alle zum Konto gespeicherten Daten als JSON (ohne Passwort-Hash und Schlüssel)."""
+    u = h.session_user(); need(u, 401, "Bitte anmelden.")
+    c = db(); uid = u["id"]
+    rows = lambda sql: [dict(r) for r in c.execute(sql, (uid,)).fetchall()]
+    acc = {k: u[k] for k in u.keys() if k not in ("pw_hash", "api_key_hash", "api_key_once")}
+    data = {"exportiert": iso(now()), "hinweis": "Alle Daten, die Offenes Recht zu Ihrem Konto speichert. Zeiten in Sekunden seit 1.1.1970 (UTC).",
+            "konto": acc, "beitraege": rows("SELECT * FROM contributions WHERE user_id=?"),
+            "bewertungen": rows("SELECT cid, v, created FROM ratings WHERE user_id=?"),
+            "paarvergleiche": rows("SELECT a, b, winner, created FROM pairwise WHERE user_id=?"),
+            "pakete": rows("SELECT * FROM packages WHERE user_id=?"),
+            "paket_inhalte": rows("SELECT i.* FROM package_items i JOIN packages p ON p.id=i.package_id WHERE p.user_id=?"),
+            "paket_bewertungen": rows("SELECT package_id, v, created FROM package_ratings WHERE user_id=?"),
+            "gefolgt": rows("SELECT kind, ref, created FROM follows WHERE user_id=?"),
+            "meldungen": rows("SELECT cid, reason, note, created, status FROM reports WHERE user_id=?"),
+            "protokoll": rows("SELECT action, target, note, created FROM audit WHERE actor=? OR (target=? AND action LIKE 'gremium:%')".replace("target=?", "target=" + str(uid)))}
+    return data
+
 # ---------- Reformpakete ----------
 PKG_MAX = 100
 def _pkg_items(c, pid):
@@ -2880,6 +2974,8 @@ ROUTES = {
     ("POST", "/api/package/update"): r_package_update, ("POST", "/api/package/add"): r_package_add, ("POST", "/api/package/rate"): r_package_rate,
     ("GET", "/api/draft"): r_draft, ("GET", "/api/drafts"): r_drafts,
     ("GET", "/api/gremium/anomalies"): r_g_anomalies, ("POST", "/api/gremium/hold"): r_g_hold,
+    ("GET", "/api/account/activity"): r_activity, ("POST", "/api/account/seen"): r_seen,
+    ("POST", "/api/account/name"): r_rename, ("GET", "/api/account/export"): r_export,
     ("POST", "/api/follow"): r_follow, ("GET", "/api/follows"): r_follows, ("POST", "/api/account/notify"): r_notify, ("GET", "/api/references"): r_references, ("GET", "/api/zahlen"): r_zahlen,
 }
 
