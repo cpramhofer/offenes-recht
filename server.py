@@ -129,9 +129,17 @@ def init_db(seed=True):
     if "aenderung" not in lcols:
         c.execute("ALTER TABLE laws ADD COLUMN aenderung TEXT")           # Novellenliste aus dem RIS (mit CELEX-Nummern)
         c.execute("DELETE FROM meta WHERE k='catalog_synced'")            # Katalog beim nächsten Start neu laden
+    if "n_changes" not in lcols:
+        for col in ("n_changes INTEGER", "n_celex INTEGER", "stf_year INTEGER", "last_year INTEGER"):
+            c.execute("ALTER TABLE laws ADD COLUMN " + col)
+    if "gold" not in cols:
+        c.execute("ALTER TABLE contributions ADD COLUMN gold INTEGER DEFAULT 0")   # Übererfüllung von EU-Recht
+        c.execute("ALTER TABLE contributions ADD COLUMN celex TEXT")
     ncols = [r[1] for r in c.execute("PRAGMA table_info(norms)")]
     if "kundmachung" not in ncols:
         c.execute("ALTER TABLE norms ADD COLUMN kundmachung TEXT")
+    if c.execute("SELECT 1 FROM laws WHERE aenderung IS NOT NULL AND n_changes IS NULL LIMIT 1").fetchone():
+        c.commit(); recompute_law_metrics(c)
     ucols = [r[1] for r in c.execute("PRAGMA table_info(users)")]
     if "consent_at" not in ucols:
         c.execute("ALTER TABLE users ADD COLUMN consent_at INTEGER")
@@ -324,6 +332,7 @@ def serialize(rows, stats, users):
                     "w": {"quote": r["w_quote"], "from": r["w_from"], "to": r["w_to"]} if r["w_quote"] else None,
                     "author": users.get(r["user_id"]), "example": bool(r["example"]), "via": r["via"], "base": r["base_text"],
                     "where": key_label(db(), r["key"]), "op": r["op"], "amend": amend_for(db(), r),
+                    "gold": {"celex": r["celex"], "url": eurlex(r["celex"]) if r["celex"] else None} if r["gold"] else None,
                     "created": r["created"], "stats": stats[r["id"]]})
     return res
 
@@ -342,6 +351,7 @@ RIS_UA = "OffenesRecht-Pilot/0.3 (+https://deregulierung.milei.eu)"
 RIS_DELAY = float(os.environ.get("OR_RIS_DELAY", "0.4"))   # Pause zwischen Anfragen im Hintergrund
 PILOT_GNR = "10007517"   # Gewerbeordnung 1994
 _ris_lock = threading.Lock()
+_zahlen_cache = {}; _ref_cache = {}
 _prefetching = set()
 _pool = ThreadPoolExecutor(max_workers=3)
 NS = "{http://www.bka.gv.at}"
@@ -407,6 +417,42 @@ def sort_key(label, i):
     suf = sum((ord(ch) - 96) * (27 ** (2 - n)) for n, ch in enumerate(m.group(3)[:3]))
     return base + int(m.group(2)) * 20000 + suf
 
+# ---------- Kennzahlen aus der RIS-Änderungsliste ----------
+_BGBL_RE = re.compile(r"BGBl\.\s*(?:I{1,3}\s*)?Nr\.\s*\d+/(\d{4})")
+def celex_norm(x):
+    """Alte CELEX-Schreibweise '390L0314' -> '31990L0314'; neue bleibt."""
+    x = x.strip().upper()
+    m = re.fullmatch(r"([0-9])(\d{2})([A-Z]{1,2})(\d{4})(\(\d+\))?", x)
+    if m: return m.group(1) + ("19" if int(m.group(2)) > 50 else "20") + m.group(2) + m.group(3) + m.group(4) + (m.group(5) or "")
+    return x if re.fullmatch(r"[0-9]\d{4}[A-Z]{1,2}\d{4}(\(\d+\))?", x) else None
+
+def law_metrics(aenderung, titel=None, kundmachung=None):
+    lines = [l.strip() for l in (aenderung or "").splitlines() if l.strip()]
+    changes = [l for l in lines if l.startswith("BGBl")]
+    years = []
+    for l in changes:
+        m = _BGBL_RE.search(l)
+        if m: years.append(int(m.group(1)))
+    celex = []
+    for l in lines:
+        for blk in re.findall(r"CELEX-Nr\.?:\s*([^\]]+)", l):
+            for tok in re.split(r"[,;\s]+", blk):
+                cx = celex_norm(tok) if tok else None
+                if cx and cx not in celex: celex.append(cx)
+    m = re.search(r"StF:\s*[^·/]*?\d+/(\d{4})", titel or "") or re.search(r"\d+/(\d{4})", kundmachung or "")
+    stf = int(m.group(1)) if m else None
+    return {"n_changes": len(changes), "years": years, "celex": celex, "stf_year": stf, "last_year": max(years) if years else stf}
+
+def recompute_law_metrics(c):
+    rows = c.execute("SELECT gnr, aenderung, titel, kundmachung FROM laws").fetchall()
+    for r in rows:
+        m = law_metrics(r["aenderung"], r["titel"], r["kundmachung"])
+        c.execute("UPDATE laws SET n_changes=?, n_celex=?, stf_year=?, last_year=? WHERE gnr=?",
+                  (m["n_changes"], len(m["celex"]), m["stf_year"], m["last_year"], r["gnr"]))
+    c.commit(); _zahlen_cache.clear()
+
+def eurlex(cx): return f"https://eur-lex.europa.eu/legal-content/DE/TXT/?uri=CELEX:{cx}"
+
 def sync_catalog():
     """Alle in Kraft stehenden Rechtsvorschriften (je eine § 0-Norm) laden."""
     c = sqlite3.connect(DB_PATH, timeout=30); page = 1; n = 0; total = None
@@ -428,6 +474,7 @@ def sync_catalog():
         if page * 100 >= hits or not docs: break
         page += 1; time.sleep(RIS_DELAY)
     all_hits, _ = ris_search({"DokumenteProSeite": "Ten"})
+    c.row_factory = sqlite3.Row; recompute_law_metrics(c)
     c.execute("INSERT OR REPLACE INTO meta VALUES('catalog_synced',?)", (str(now()),))
     c.execute("INSERT OR REPLACE INTO meta VALUES('total_laws',?)", (str(total),))
     c.execute("INSERT OR REPLACE INTO meta VALUES('total_norms',?)", (str(all_hits),))
@@ -452,9 +499,10 @@ def sweep_counts():
 def list_norms(gnr):
     """Normliste eines Gesetzes aus dem RIS holen (falls noch nicht vorhanden)."""
     c = db()
-    if c.execute("SELECT norms_listed FROM laws WHERE gnr=?", (gnr,)).fetchone()[0]: return
+    stale = lambda: c.execute("SELECT 1 FROM norms WHERE gnr=? AND kundmachung IS NULL LIMIT 1", (gnr,)).fetchone()
+    if c.execute("SELECT norms_listed FROM laws WHERE gnr=?", (gnr,)).fetchone()[0] and not stale(): return
     with _ris_lock:
-        if db().execute("SELECT norms_listed FROM laws WHERE gnr=?", (gnr,)).fetchone()[0]: return
+        if db().execute("SELECT norms_listed FROM laws WHERE gnr=?", (gnr,)).fetchone()[0] and not stale(): return
         page = 1; rows = []
         while True:
             hits, docs = ris_search({"Gesetzesnummer": gnr, "Seitennummer": page})
@@ -471,7 +519,8 @@ def list_norms(gnr):
             c.execute("""INSERT INTO norms(nor,gnr,pid,label,sort,inkraft,xml_url,kundmachung) VALUES(?,?,?,?,?,?,?,?)
                          ON CONFLICT(nor) DO UPDATE SET pid=excluded.pid,label=excluded.label,sort=excluded.sort,inkraft=excluded.inkraft,xml_url=excluded.xml_url,
                          kundmachung=excluded.kundmachung""",
-                      (x["nor"], gnr, pid, x["label"], sort_key(x["label"], i), x["inkraft"], x["xml"], x["kundmachung"]))
+                      (x["nor"], gnr, pid, x["label"], sort_key(x["label"], i), x["inkraft"], x["xml"], x["kundmachung"] or ""))
+        c.execute("UPDATE norms SET kundmachung='' WHERE gnr=? AND kundmachung IS NULL", (gnr,))
         c.execute("UPDATE laws SET norms_listed=?, n_norms=? WHERE gnr=?", (now(), len(rows), gnr)); c.commit()
 
 def _txt(el):
@@ -840,7 +889,7 @@ def need(cond, code, msg):
     if not cond: raise ApiError(code, msg)
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "OffenesRecht/1.3.1"
+    server_version = "OffenesRecht/1.4"
 
     def log_message(self, fmt, *a):
         # bewusst ohne IP-Adresse (Datenschutz); Fehlersuche über Pfad und Status
@@ -1068,9 +1117,12 @@ def create_contribution(u, d, via):
     if op:
         need(not db().execute("SELECT 1 FROM contributions WHERE key=? AND op='repeal' AND user_id=? AND removed_at IS NULL", (key, u["id"])).fetchone(),
              409, "Sie haben die Streichung dieser Stelle bereits vorgeschlagen.")
-    cur = db().execute("""INSERT INTO contributions(key,type,text,why,w_quote,w_from,w_to,user_id,via,created,base_text,op)
-                          VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
-                       (key, typ, text, why or None, wq, w.get("from") if wq else None, w.get("to") if wq else None, u["id"], via, now(), base, op))
+    gold = 1 if d.get("gold") else 0; celex = None
+    if gold and d.get("celex"):
+        celex = celex_norm(str(d["celex"])); need(celex, 400, "Ungültige CELEX-Nummer, z. B. 32006L0123.")
+    cur = db().execute("""INSERT INTO contributions(key,type,text,why,w_quote,w_from,w_to,user_id,via,created,base_text,op,gold,celex)
+                          VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                       (key, typ, text, why or None, wq, w.get("from") if wq else None, w.get("to") if wq else None, u["id"], via, now(), base, op, gold, celex))
     db().commit()
     return {"id": cur.lastrowid}
 
@@ -1414,10 +1466,11 @@ def r_catalog(h):
     if q.get("idx"): where.append("idx LIKE ?"); args.append(q["idx"] + "%")
     if q.get("mine") == "1": where.append("gnr IN (SELECT DISTINCT substr(key,1,8) FROM contributions)")
     w = (" WHERE " + " AND ".join(where)) if where else ""
-    order = {"norms": "COALESCE(n_norms,0) DESC, kurztitel", "contrib": "nc DESC, kurztitel", "new": "inkraft DESC"}.get(q.get("sort"), "kurztitel COLLATE NOCASE")
+    order = {"norms": "COALESCE(n_norms,0) DESC, kurztitel", "contrib": "nc DESC, kurztitel", "new": "inkraft DESC",
+             "changes": "COALESCE(n_changes,0) DESC, kurztitel", "old": "COALESCE(stf_year,9999), kurztitel", "eu": "COALESCE(n_celex,0) DESC, kurztitel"}.get(q.get("sort"), "kurztitel COLLATE NOCASE")
     off = max(0, int(q.get("offset") or 0)); lim = min(200, max(1, int(q.get("limit") or 60)))
     total = c.execute("SELECT COUNT(*) FROM laws" + w, args).fetchone()[0]
-    rows = c.execute(f"""SELECT l.gnr,l.kurztitel,l.abk,l.typ,l.tgroup,l.idx,l.inkraft,l.n_norms,
+    rows = c.execute(f"""SELECT l.gnr,l.kurztitel,l.abk,l.typ,l.tgroup,l.idx,l.inkraft,l.n_norms,l.n_changes,l.n_celex,l.stf_year,
                          (SELECT COUNT(*) FROM contributions WHERE key LIKE l.gnr||'/%' AND removed_at IS NULL) nc FROM laws l {w} ORDER BY {order} LIMIT ? OFFSET ?""",
                      args + [lim, off]).fetchall()
     m = {r["k"]: r["v"] for r in c.execute("SELECT * FROM meta")}
@@ -1443,22 +1496,30 @@ def r_law(h):
     norms = [{"pid": r["pid"], "label": r["label"], "title": r["title"], "loaded": bool(r["fetched"]), "inkraft": r["inkraft"], "nc": counts.get(r["pid"], 0)}
              for r in c.execute("SELECT pid,label,title,fetched,inkraft FROM norms WHERE gnr=? ORDER BY sort", (gnr,))]
     law = dict(c.execute("SELECT * FROM laws WHERE gnr=?", (gnr,)).fetchone())
+    m = law_metrics(law.pop("aenderung", None), law.get("titel"), law.get("kundmachung"))
+    law["metrics"] = {"changes": m["n_changes"], "stf_year": m["stf_year"], "last_year": m["last_year"],
+                      "celex": [{"id": x, "url": eurlex(x)} for x in m["celex"]], "last_change": last_change_from(m, c, gnr)}
     return {"law": law, "norms": norms, "loading": sum(1 for n in norms if not n["loaded"])}
+
+def last_change_from(m, c, gnr):
+    r = c.execute("SELECT aenderung FROM laws WHERE gnr=?", (gnr,)).fetchone()
+    return last_change(r["aenderung"] if r else None)
 
 def r_norm(h):
     gnr, pid = h.query.get("gnr", ""), h.query.get("pid", "")
     need(re.fullmatch(r"\d{8}", gnr) and re.fullmatch(r"[a-z]+[0-9a-z_]*", pid), 400, "Ungültige Angabe.")
-    r = db().execute("SELECT nor,label,inkraft FROM norms WHERE gnr=? AND pid=?", (gnr, pid)).fetchone(); need(r, 404, "Norm nicht gefunden.")
+    r = db().execute("SELECT nor,label,inkraft,kundmachung FROM norms WHERE gnr=? AND pid=?", (gnr, pid)).fetchone(); need(r, 404, "Norm nicht gefunden.")
     try: body = fetch_norm(r["nor"])
     except Exception: raise ApiError(502, "Das RIS antwortet gerade nicht. Bitte später erneut versuchen.")
-    return {"pid": pid, "label": r["label"], "inkraft": r["inkraft"], "nor": r["nor"], **body}
+    words = sum(len(u["t"].split()) for u in body.get("units", []))
+    return {"pid": pid, "label": r["label"], "inkraft": r["inkraft"], "nor": r["nor"], "kundmachung": last_change(r["kundmachung"]) if (r["kundmachung"] and len(_BGBL_RE.findall(r["kundmachung"])) > 1) else None, "words": words, **body}
 
 # ---------- Öffentliche API v1 und MCP-Server ----------
 # Lesen: frei, ohne Schlüssel (Mengenbegrenzung je IP). Schreiben: nur vom Gremium zugelassene Bots
 # mit API-Schlüssel (Authorization: Bearer …). REST und MCP verwenden dieselben Kernfunktionen.
 from urllib.parse import unquote
 
-APP_VERSION = "1.3.1"
+APP_VERSION = "1.4"
 READ_LIMIT_PER_MIN = int(os.environ.get("OR_API_READ_LIMIT", "120"))
 WRITE_LIMIT_PER_HOUR = int(os.environ.get("OR_API_WRITE_HOUR", "20"))
 WRITE_LIMIT_PER_DAY = int(os.environ.get("OR_API_WRITE_DAY", "100"))
@@ -1559,7 +1620,11 @@ def api_get_law(gnr):
     norms = [{"paragraph": r["label"], "pid": r["pid"], "title": r["title"], "in_force_since": r["inkraft"],
               "contributions": counts.get(r["pid"], 0)}
              for r in c.execute("SELECT * FROM norms WHERE gnr=? ORDER BY sort", (gnr,))]
+    m = law_metrics(law["aenderung"], law["titel"], law["kundmachung"])
     return {**api_law_brief(law, sum(counts.values())), "title": law["titel"], "eli": law["eli"],
+            "metrics": {"amendments": m["n_changes"], "original_year": m["stf_year"], "last_amended_year": m["last_year"],
+                        "last_amended_by": last_change(law["aenderung"]),
+                        "eu_acts": [{"celex": x, "url": eurlex(x)} for x in m["celex"]]},
             "ris_url": f"https://www.ris.bka.gv.at/GeltendeFassung.wxe?Abfrage=Bundesnormen&Gesetzesnummer={gnr}",
             "norms": norms, "note": "Titel fehlender Normen werden im Hintergrund nachgeladen." if any(n["title"] is None for n in norms) else None}
 
@@ -1601,6 +1666,7 @@ def api_contribution(r, st, users, c):
         out["amendment_instruction"] = amend_for(c, r)
         out["norm_changed_since"] = bool(cur and r["base_text"] and cur != r["base_text"])
     if r["w_quote"]: out["quote"] = {"text": r["w_quote"], "word_from": r["w_from"], "word_to": r["w_to"]}
+    if r["gold"]: out["goldplating"] = {"celex": r["celex"], "url": eurlex(r["celex"]) if r["celex"] else None}
     return out
 
 def _contrib_rows(gnr=None, key=None):
@@ -1612,8 +1678,9 @@ def _contrib_rows(gnr=None, key=None):
     where.append("removed_at IS NULL")
     return c.execute("SELECT * FROM contributions WHERE " + " AND ".join(where) + " ORDER BY id", args).fetchall()
 
-def api_list_contributions(gnr=None, key=None, type=None, sort="score", limit=20, offset=0):
+def api_list_contributions(gnr=None, key=None, type=None, sort="score", limit=20, offset=0, goldplating=False):
     c = db(); rows = _contrib_rows(gnr, key)
+    if goldplating: rows = [r for r in rows if r["gold"]]
     st = contribution_stats(c, rows); users = all_users(c)
     t = TYPE_IN.get((type or "").lower()) if type else None
     need(not type or t, 400, "type: comment oder proposal.")
@@ -1655,13 +1722,13 @@ def _need_bot(bot):
     need(bot is not None, 401, "Schreiben erfordert den API-Schlüssel eines zugelassenen Bots (Authorization: Bearer …).")
     need(bot["role"] == "bot" and bot["status"] == "active", 403, "Dieser Bot ist nicht zugelassen.")
 
-def api_post(bot, key, type, text, reason=None, quote=None):
-    _need_bot(bot)
+def api_post(bot, key, type, text, reason=None, quote=None, goldplating=False, celex=None):
+    _need_bot(bot); gp = {"gold": bool(goldplating), "celex": celex}
     if (type or "").lower() in ("repeal", "streichung"):
         if (key or "").count("/") == 1: key = key.rstrip("/") + "/ganz"          # 'gnr/p74' = ganzer Paragraph
         key, unit = _resolve_key(key)
         write_limit(bot)
-        res = create_contribution(bot, {"key": key, "type": "prop", "op": "repeal", "why": reason}, "api")
+        res = create_contribution(bot, {"key": key, "type": "prop", "op": "repeal", "why": reason, **gp}, "api")
         log(bot["id"], "api-post", res["id"]); db().commit()
         return api_get_contribution(res["id"])
     key, unit = _resolve_key(key)
@@ -1673,7 +1740,7 @@ def api_post(bot, key, type, text, reason=None, quote=None):
         fr = len(unit[:i].split()) + 1; w = {"quote": q, "from": fr, "to": fr + len(q.split()) - 1}
     if t == "prop": need((text or "").strip() != unit, 400, "Der vorgeschlagene Wortlaut ist identisch mit dem geltenden.")
     write_limit(bot)
-    res = create_contribution(bot, {"key": key, "type": t, "text": text, "why": reason, "w": w}, "api")
+    res = create_contribution(bot, {"key": key, "type": t, "text": text, "why": reason, "w": w, **gp}, "api")
     log(bot["id"], "api-post", res["id"]); db().commit()
     return api_get_contribution(res["id"])
 
@@ -1735,20 +1802,23 @@ def v1_law(h, gnr): _bot(h); return api_get_law(gnr)
 def v1_norm(h, gnr, p): _bot(h); return api_get_norm(gnr, p)
 def v1_contribs(h):
     _bot(h); q = h.query
-    return api_list_contributions(q.get("gnr"), q.get("key"), q.get("type"), q.get("sort", "score"), _int(h, "limit", 20), _int(h, "offset", 0))
+    return api_list_contributions(q.get("gnr"), q.get("key"), q.get("type"), q.get("sort", "score"), _int(h, "limit", 20), _int(h, "offset", 0),
+                                  q.get("goldplating") in ("1", "true"))
 def v1_contrib(h, cid): _bot(h); return api_get_contribution(cid)
 def v1_top(h): _bot(h); return api_top_proposals(h.query.get("gnr"), _int(h, "limit", 10))
 def v1_me(h): return api_me(_bot(h))
 def v1_post(h):
     b = _bot(h); d = h.body()
     w = d.get("w") or {}
-    return api_post(b, d.get("key"), d.get("type"), d.get("text"), d.get("reason") or d.get("why"), d.get("quote") or w.get("quote"))
+    return api_post(b, d.get("key"), d.get("type"), d.get("text"), d.get("reason") or d.get("why"), d.get("quote") or w.get("quote"),
+                    d.get("goldplating"), d.get("celex"))
 def v1_openapi(h): return openapi_spec()
 def v1_packages(h): _bot(h); return api_list_packages(_int(h, "limit", 20), _int(h, "offset", 0))
 def v1_package(h, pid): _bot(h); return api_package(pid)
 def v1_package_post(h):
     b = _bot(h); d = h.body()
     return api_create_package(b, d.get("title"), d.get("summary"), d.get("proposal_ids") or d.get("items"))
+def v1_refs(h): _bot(h); return find_references(h.query.get("key", ""))
 def v1_draft(h):
     _bot(h)
     try: ids = [int(x) for x in (h.query.get("ids") or "").split(",") if x.strip()]
@@ -1769,6 +1839,7 @@ API_PATTERNS = [
     ("POST", re.compile(r"^/api/v1/packages$"), v1_package_post),
     ("GET", re.compile(r"^/api/v1/packages/(\d+)$"), v1_package),
     ("GET", re.compile(r"^/api/v1/draft$"), v1_draft),
+    ("GET", re.compile(r"^/api/v1/references$"), v1_refs),
 ]
 
 # --- MCP (Model Context Protocol, Transport „Streamable HTTP“, zustandslos, JSON-Antworten)
@@ -1781,7 +1852,8 @@ MCP_INSTRUCTIONS = (
     "erscheint öffentlich mit Bot-Kennzeichnung und dem Bot-Profil (Auftraggeber, Auftrag, Betreiber, Modell). "
     "Bots bewerten nicht. Bewertungsfrage für Vorschläge: 'Fördert diese Änderung Wachstum und Wohlstand für alle?' "
     "Entbehrliche Regeln: propose_repeal (auch ganzer Paragraph oder ganze Rechtsvorschrift). Zusammengehörige Vorschläge: create_package; "
-    "jeder Vorschlag und jedes Paket liefert einen Gesetzesentwurf mit Novellierungsanordnungen (draft_bill, get_package).")
+    "jeder Vorschlag und jedes Paket liefert einen Gesetzesentwurf mit Novellierungsanordnungen (draft_bill, get_package). "
+    "Vor Änderungen find_references nutzen (Folgeänderungen). Geht eine Regel über EU-Vorgaben hinaus, goldplating=true und celex angeben.")
 
 _RO = {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}
 _WR = {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False}
@@ -1810,6 +1882,7 @@ MCP_TOOLS = [
          "gnr": _s("string", "Optional: nur diese Rechtsvorschrift"),
          "key": _s("string", "Optional: nur diese Stelle und ihre Untergliederungen, z. B. '10007517/p74' oder '10007517/p74/abs2'"),
          "type": _s("string", "Optional: comment oder proposal", enum=["comment", "proposal"]),
+         "goldplating": _s("boolean", "Optional: nur Beiträge, die eine Übererfüllung von EU-Recht melden"),
          "sort": _s("string", "score (Standard), new oder old", enum=["score", "new", "old"]),
          "limit": _s("integer", "1–100, Standard 20", minimum=1, maximum=100), "offset": _s("integer", "Für weitere Seiten", minimum=0)}},
      "annotations": {**_RO, "title": "Beiträge"}},
@@ -1826,20 +1899,30 @@ MCP_TOOLS = [
      "inputSchema": {"type": "object", "required": ["key", "text"], "properties": {
          "key": _s("string", "Schlüssel der Stelle aus get_norm, z. B. '10007517/p74/abs2/z2'"),
          "text": _s("string", "Kommentar (5–8000 Zeichen)", minLength=5, maxLength=8000),
-         "quote": _s("string", "Optional: wörtliches Zitat aus dem Text der Stelle")}}, "annotations": {**_WR, "title": "Kommentieren"}},
+         "quote": _s("string", "Optional: wörtliches Zitat aus dem Text der Stelle"),
+         "goldplating": _s("boolean", "Optional: true, wenn die Stelle über die Vorgaben einer EU-Richtlinie hinausgeht (Übererfüllung, Gold-Plating)"),
+         "celex": _s("string", "Optional: CELEX-Nummer des EU-Rechtsakts, z. B. 32006L0123 (get_law liefert die umgesetzten Rechtsakte)")}}, "annotations": {**_WR, "title": "Kommentieren"}},
     {"name": "propose_amendment", "title": "Änderung vorschlagen",
      "description": "Schlägt einen neuen Wortlaut für eine Stelle vor (öffentlich, mit Bot-Kennzeichnung und Wort-Diff). Nur mit API-Schlüssel eines zugelassenen Bots. Begründung ist Pflicht.",
      "inputSchema": {"type": "object", "required": ["key", "new_text", "reason"], "properties": {
          "key": _s("string", "Schlüssel der Stelle aus get_norm"),
          "new_text": _s("string", "Vollständiger neuer Wortlaut der Stelle", minLength=5, maxLength=8000),
-         "reason": _s("string", "Begründung: Was verbessert sich, und wie dient es Wachstum und Wohlstand?", minLength=10)}},
+         "reason": _s("string", "Begründung: Was verbessert sich, und wie dient es Wachstum und Wohlstand?", minLength=10),
+         "goldplating": _s("boolean", "Optional: true, wenn die Stelle über die Vorgaben einer EU-Richtlinie hinausgeht (Übererfüllung, Gold-Plating)"),
+         "celex": _s("string", "Optional: CELEX-Nummer des EU-Rechtsakts, z. B. 32006L0123 (get_law liefert die umgesetzten Rechtsakte)")}},
      "annotations": {**_WR, "title": "Änderung vorschlagen"}},
     {"name": "propose_repeal", "title": "Ersatzlose Streichung vorschlagen",
      "description": "Schlägt vor, eine Stelle ersatzlos zu streichen: einen Absatz, eine Ziffer oder litera (key aus get_norm), einen ganzen Paragraphen ('Gesetzesnummer/p74/ganz') oder eine ganze Rechtsvorschrift ('Gesetzesnummer/gesetz/ganz'). Nur mit API-Schlüssel eines zugelassenen Bots. Begründung ist Pflicht.",
      "inputSchema": {"type": "object", "required": ["key", "reason"], "properties": {
          "key": _s("string", "Stelle, ganzer Paragraph ('…/p74/ganz') oder ganze Rechtsvorschrift ('…/gesetz/ganz')"),
-         "reason": _s("string", "Begründung: Warum ist die Regel entbehrlich, und wie dient die Streichung Wachstum und Wohlstand?", minLength=10)}},
+         "reason": _s("string", "Begründung: Warum ist die Regel entbehrlich, und wie dient die Streichung Wachstum und Wohlstand?", minLength=10),
+         "goldplating": _s("boolean", "Optional: true, wenn die Stelle über die Vorgaben einer EU-Richtlinie hinausgeht (Übererfüllung, Gold-Plating)"),
+         "celex": _s("string", "Optional: CELEX-Nummer des EU-Rechtsakts, z. B. 32006L0123 (get_law liefert die umgesetzten Rechtsakte)")}},
      "annotations": {**_WR, "title": "Streichung vorschlagen"}},
+    {"name": "find_references", "title": "Folgenprüfung: Verweise auf eine Stelle",
+     "description": "Findet Stellen, die auf einen Paragraphen oder Absatz verweisen: im selben Gesetz (Normtext) und in anderen Rechtsvorschriften (RIS-Volltextsuche). Vor Änderungs- oder Streichungsvorschlägen nutzen, um Folgeänderungen zu erkennen; gefundene Probleme als Kommentar an der betroffenen Stelle melden.",
+     "inputSchema": {"type": "object", "required": ["key"], "properties": {
+         "key": _s("string", "Stelle oder Paragraph, z. B. '10007517/p74/abs2' oder '10007517/p74'")}}, "annotations": {**_RO, "openWorldHint": True, "title": "Verweise finden"}},
     {"name": "list_packages", "title": "Reformpakete auflisten",
      "description": "Reformpakete (gebündelte Änderungsvorschläge, auch über mehrere Gesetze) mit Bewertung.",
      "inputSchema": {"type": "object", "properties": {"limit": _s("integer", "1–100, Standard 20", minimum=1, maximum=100),
@@ -1868,12 +1951,13 @@ def mcp_call(name, a, bot):
     if name == "search_laws": return api_search_laws(a.get("query", ""), a.get("category", ""), a.get("subject_area", ""), a.get("limit", 20), a.get("offset", 0))
     if name == "get_law": return api_get_law(str(a.get("gnr", "")))
     if name == "get_norm": return api_get_norm(str(a.get("gnr", "")), a.get("paragraph"))
-    if name == "list_contributions": return api_list_contributions(a.get("gnr"), a.get("key"), a.get("type"), a.get("sort", "score"), a.get("limit", 20), a.get("offset", 0))
+    if name == "list_contributions": return api_list_contributions(a.get("gnr"), a.get("key"), a.get("type"), a.get("sort", "score"), a.get("limit", 20), a.get("offset", 0), bool(a.get("goldplating")))
     if name == "get_contribution": return api_get_contribution(a.get("id", 0))
     if name == "top_proposals": return api_top_proposals(a.get("gnr"), a.get("limit", 10))
-    if name == "post_comment": return api_post(bot, a.get("key"), "comment", a.get("text"), quote=a.get("quote"))
-    if name == "propose_amendment": return api_post(bot, a.get("key"), "proposal", a.get("new_text"), reason=a.get("reason"))
-    if name == "propose_repeal": return api_post(bot, a.get("key"), "repeal", None, reason=a.get("reason"))
+    if name == "post_comment": return api_post(bot, a.get("key"), "comment", a.get("text"), quote=a.get("quote"), goldplating=a.get("goldplating"), celex=a.get("celex"))
+    if name == "propose_amendment": return api_post(bot, a.get("key"), "proposal", a.get("new_text"), reason=a.get("reason"), goldplating=a.get("goldplating"), celex=a.get("celex"))
+    if name == "find_references": return find_references(a.get("key"))
+    if name == "propose_repeal": return api_post(bot, a.get("key"), "repeal", None, reason=a.get("reason"), goldplating=a.get("goldplating"), celex=a.get("celex"))
     if name == "list_packages": return api_list_packages(a.get("limit", 20), a.get("offset", 0))
     if name == "get_package": return api_package(a.get("id", 0))
     if name == "create_package": return api_create_package(bot, a.get("title"), a.get("summary"), a.get("proposal_ids"))
@@ -1953,8 +2037,143 @@ def openapi_spec():
                                                   "title": {"type": "string"}, "summary": {"type": "string"}, "proposal_ids": {"type": "array", "items": {"type": "integer"}}}}}}},
                                               "responses": ok}},
                 "/api/v1/packages/{id}": {"get": {"summary": "Reformpaket mit Gesetzesentwurf", "parameters": [P("id", "path", "Paket-ID", "integer", True)], "responses": ok}},
+                "/api/v1/references": {"get": {"summary": "Folgenprüfung: Verweise auf eine Stelle", "parameters": [P("key", "query", "Stelle oder Paragraph", "string", True)], "responses": ok}},
                 "/api/v1/draft": {"get": {"summary": "Gesetzesentwurf aus Vorschlägen", "parameters": [P("ids", "query", "Kommagetrennte Vorschlags-IDs", "string", True)], "responses": ok}},
                 "/mcp": {"post": {"summary": "MCP-Server (Streamable HTTP, JSON-RPC 2.0)", "responses": ok}}}}
+
+# ---------- Folgenprüfung: Verweise auf eine Stelle ----------
+REF_TTL = 6 * 3600
+def _genitive(name):
+    """'Gewerbeordnung 1994' -> 'der Gewerbeordnung 1994'; 'Wasserrechtsgesetz 1959' -> 'des Wasserrechtsgesetzes 1959'."""
+    art = law_article(name)
+    if art == "die": return "der " + name
+    m = re.match(r"^(.*?)(gesetz|recht|abkommen|statut|protokoll|übereinkommen)(\s.*)?$", name, re.I)
+    if m: return "des " + m.group(1) + m.group(2) + "es" + (m.group(3) or "")
+    return "des " + name
+
+def _num_suffix(label):
+    m = re.match(r"^(§|Art\.?)\s*(\d+)([a-z]*)", label or "")
+    return (m.group(1), m.group(2), m.group(3)) if m else (None, None, None)
+
+def internal_refs(c, gnr, pid, abs_no):
+    """Stellen im selben Gesetz, die auf § X (Abs. Y) verweisen – Heuristik über die geladenen Normtexte."""
+    n = c.execute("SELECT label FROM norms WHERE gnr=? AND pid=?", (gnr, pid)).fetchone()
+    sym, num, suf = _num_suffix(n["label"] if n else "")
+    if not num or sym != "§": return [], 0, 0
+    target = num + suf
+    single = re.compile(r"§\s*" + re.escape(target) + r"(?![0-9a-z])(?P<rest>[^§;]{0,40})")
+    multi = re.compile(r"§§\s*([0-9a-z ,.und bisAbsZlit]+)")
+    foreign = re.compile(r"^\s*(?:Abs\.\s*\d+[a-z]?\s*)?(?:Z\s*\d+[a-z]?\s*)?(?:lit\.\s*[a-z]+\s*)?(?:des|der|[A-ZÄÖÜ][A-Za-zÄÖÜäöü\-]*G\b|[A-ZÄÖÜ]{2,})")
+    out = []; loaded = 0; total = 0
+    for r in c.execute("SELECT pid, label, body FROM norms WHERE gnr=? ORDER BY sort", (gnr,)):
+        total += 1
+        if not r["body"]: continue
+        loaded += 1
+        if r["pid"] == pid: continue
+        for u in json.loads(r["body"])["units"]:
+            t = u["t"]; hit = None
+            for m in single.finditer(t):
+                rest = m.group("rest")
+                if foreign.match(rest): continue           # Verweis auf ein anderes Gesetz
+                am = re.match(r"\s*Abs\.\s*(\d+[a-z]?)", rest)
+                if abs_no and am and am.group(1) != abs_no: continue
+                hit = m.group(0)[:60]; break
+            if not hit:
+                for m in multi.finditer(t):
+                    nums = re.findall(r"\d+[a-z]?", m.group(1))
+                    rng = re.search(r"(\d+)[a-z]?\s*bis\s*(\d+)", m.group(1))
+                    if target in nums or (rng and int(rng.group(1)) <= int(num) <= int(rng.group(2))):
+                        hit = m.group(0)[:60]; break
+            if hit:
+                key = f"{gnr}/{r['pid']}/{u['a']}"
+                i = t.find(hit[:20]); snip = t[max(0, i - 80): i + 120]
+                out.append({"key": key, "address": key_label(c, key), "snippet": ("…" if i > 80 else "") + snip + ("…" if i + 120 < len(t) else ""),
+                            "url": web_url(key), "same_law": True})
+    return out, loaded, total
+
+def external_refs(c, gnr, label, abs_no):
+    law = c.execute("SELECT kurztitel, abk FROM laws WHERE gnr=?", (gnr,)).fetchone()
+    if not law: return []
+    base = label + (f" Abs. {abs_no}" if abs_no else "")
+    names = [x for x in {law["abk"], law["kurztitel"]} if x]
+    phrases = []
+    for nm in names:
+        phrases.append(f'"{base} {nm}"')
+        if nm == law["kurztitel"]: phrases.append(f'"{base} {_genitive(nm)}"')
+    if abs_no:   # Verweise auf den ganzen Paragraphen betreffen die Stelle ebenfalls
+        phrases += [f'"{label} {law["abk"]}"'] if law["abk"] else []
+    seen = {}; errors = 0
+    for ph in phrases[:5]:
+        try: hits, docs = ris_search({"Suchworte": ph, "DokumenteProSeite": "Fifty"})
+        except Exception: errors += 1; continue
+        for d in docs:
+            try: x = _meta(d)
+            except Exception: continue
+            if not x["gnr"] or x["gnr"] == gnr or x["nor"] in seen: continue
+            pid = pid_of(x["label"])
+            seen[x["nor"]] = {"key": f"{x['gnr']}/{pid}", "address": f"{x['abk'] or x['kurztitel']} {x['label']}".strip(),
+                              "law": x["kurztitel"], "url": f"{PUBLIC_URL}/#/g/{x['gnr']}/{pid}",
+                              "ris_url": f"https://www.ris.bka.gv.at/Dokumente/Bundesnormen/{x['nor']}/{x['nor']}.html",
+                              "same_law": False, "match": ph.strip('"')}
+        time.sleep(RIS_DELAY)
+    if errors and not seen and errors == len(phrases[:5]): raise ApiError(502, "Das RIS antwortet gerade nicht. Bitte später erneut versuchen.")
+    return sorted(seen.values(), key=lambda r: r["address"])
+
+def find_references(key):
+    """Welche Stellen verweisen auf diese Stelle? Im selben Gesetz (Normtexte) und in anderen Rechtsvorschriften (RIS-Volltextsuche)."""
+    key = (key or "").strip()
+    need(KEY_RE.match(key) or re.fullmatch(r"\d{8}/[a-z]+[0-9a-z_]*", key), 400, "Ungültiger Schlüssel.")
+    hit = _ref_cache.get(key)
+    if hit and time.time() - hit[0] < REF_TTL: return hit[1]
+    c = db(); parts = key.split("/"); gnr, pid = parts[0], parts[1]
+    need(pid != "gesetz", 400, "Für eine ganze Rechtsvorschrift bitte die RIS-Volltextsuche nach ihrem Titel verwenden.")
+    n = c.execute("SELECT label FROM norms WHERE gnr=? AND pid=?", (gnr, pid)).fetchone(); need(n, 404, "Norm nicht gefunden.")
+    am = re.match(r"abs(\d+[a-z]?)", parts[2]) if len(parts) > 2 else None
+    abs_no = am.group(1) if am else None
+    internal, loaded, total = internal_refs(c, gnr, pid, abs_no)
+    external = external_refs(c, gnr, n["label"], abs_no)
+    res = {"key": key, "address": key_label(c, key), "internal": internal, "external": external,
+           "internal_complete": loaded >= total, "norms_loaded": loaded, "norms_total": total,
+           "note": "Heuristische Suche: Verweise im selben Gesetz aus dem Normtext, Verweise aus anderen Rechtsvorschriften über die RIS-Volltextsuche. "
+                   "Verweise auf einzelne Ziffern oder in anderer Schreibweise können fehlen; Treffer bitte prüfen."}
+    if loaded >= total: _ref_cache[key] = (time.time(), res)
+    return res
+
+def r_references(h): return find_references(h.query.get("key", ""))
+
+# ---------- Das Recht in Zahlen ----------
+def zahlen():
+    hit = _zahlen_cache.get("z")
+    if hit and time.time() - hit[0] < 3600: return hit[1]
+    c = db(); by_year = {}; by_decade = {}; celex = set(); total_changes = 0
+    for r in c.execute("SELECT aenderung, titel, kundmachung, tgroup FROM laws"):
+        m = law_metrics(r["aenderung"], r["titel"], r["kundmachung"])
+        total_changes += m["n_changes"]; celex.update(m["celex"])
+        for y in m["years"]: by_year[y] = by_year.get(y, 0) + 1
+        if m["stf_year"]: d = m["stf_year"] // 10 * 10; by_decade[d] = by_decade.get(d, 0) + 1
+    cols = "gnr, kurztitel, abk, typ, tgroup, n_norms, n_changes, n_celex, stf_year, last_year"
+    top = lambda order, where="1": [dict(r) for r in c.execute(f"SELECT {cols} FROM laws WHERE {where} ORDER BY {order} LIMIT 15")]
+    m = {r["k"]: r["v"] for r in c.execute("SELECT * FROM meta")}
+    res = {"laws": c.execute("SELECT COUNT(*) FROM laws").fetchone()[0], "norms": int(m.get("total_norms") or 0),
+           "changes": total_changes, "celex": len(celex),
+           "laws_with_eu": c.execute("SELECT COUNT(*) FROM laws WHERE n_celex>0").fetchone()[0],
+           "by_year": sorted([[y, n] for y, n in by_year.items() if 1945 <= y <= datetime.date.today().year]),
+           "by_decade": sorted([[d, n] for d, n in by_decade.items() if d >= 1800]),
+           "top_changes": top("COALESCE(n_changes,0) DESC"), "top_old": top("stf_year", "stf_year IS NOT NULL"),
+           "top_norms": top("COALESCE(n_norms,0) DESC"), "top_eu": top("COALESCE(n_celex,0) DESC"),
+           }
+    _zahlen_cache["z"] = (time.time(), res)
+    return res
+
+def r_zahlen(h):
+    c = db(); res = dict(zahlen())
+    gold = c.execute("SELECT * FROM contributions WHERE gold=1 AND removed_at IS NULL ORDER BY id DESC LIMIT 100").fetchall()
+    st = contribution_stats(c, gold)
+    res.update({"proposals": c.execute("SELECT COUNT(*) FROM contributions WHERE type='prop' AND removed_at IS NULL").fetchone()[0],
+                "repeals": c.execute("SELECT COUNT(*) FROM contributions WHERE op='repeal' AND removed_at IS NULL").fetchone()[0],
+                "packages": c.execute("SELECT COUNT(*) FROM packages WHERE removed_at IS NULL").fetchone()[0],
+                "gold": serialize(sorted(gold, key=lambda r: -st[r["id"]]["score"]), st, all_users(c))})
+    return res
 
 # ---------- Reformpakete ----------
 PKG_MAX = 100
@@ -2109,7 +2328,7 @@ ROUTES = {
     ("POST", "/api/report"): r_report, ("GET", "/api/moderation"): r_moderation_log, ("POST", "/api/account/renew-key"): r_renew_key,
     ("GET", "/api/packages"): r_packages, ("GET", "/api/package"): r_package, ("POST", "/api/packages"): r_package_create,
     ("POST", "/api/package/update"): r_package_update, ("POST", "/api/package/add"): r_package_add, ("POST", "/api/package/rate"): r_package_rate,
-    ("GET", "/api/draft"): r_draft,
+    ("GET", "/api/draft"): r_draft, ("GET", "/api/references"): r_references, ("GET", "/api/zahlen"): r_zahlen,
 }
 
 # ---------- Kommandozeile ----------

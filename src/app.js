@@ -68,7 +68,8 @@ function go(hash){ if (location.hash !== hash) location.hash = hash; else route(
 async function route(){
   const p = location.hash.replace(/^#\/?/, "").split("/").filter(Boolean);
   S.compare = false;
-  if (["impressum","datenschutz","reset","api","projekt","moderation","paket"].includes(p[0])){
+  if (["impressum","datenschutz","reset","api","projekt","moderation","paket","zahlen"].includes(p[0])){
+    if (p[0]==="zahlen"){ try { S.zahlen = await api("/api/zahlen"); } catch(e){ S.zahlen = {error:e.message}; } }
     if (p[0]==="moderation"){ try { S.modlog = await api("/api/moderation"); } catch(e){ S.modlog = {removed:[], stats:{}}; } }
     if (p[0]==="paket"){ try { S.pkg = await api("/api/package?id="+(+p[1]||0)); } catch(e){ S.pkg = {error:e.message}; } }
     S.mode = "home"; S.gnr = null; S.law = null; S.page = p[0]; S.resetToken = p[1] || null;
@@ -172,6 +173,7 @@ function propDiff(c, base, short){
   return base ? (short ? diffShort(base, c.text) : diffWords(base, c.text)) : esc(c.text);
 }
 const propKind = c => isRepeal(c) ? "Streichung" : "Änderungsvorschlag";
+const goldPill = c => c.gold ? (c.gold.url ? `<a class="pill eu" href="${esc(c.gold.url)}" target="_blank" rel="noopener" title="EU-Rechtsakt ${esc(c.gold.celex)} auf EUR-Lex">Übererfüllt EU-Recht · ${esc(c.gold.celex)}</a>` : `<span class="pill eu">Übererfüllt EU-Recht</span>`) : "";
 // Kurzfassung für Übersichten: unveränderte Passagen auf wenige Wörter Kontext kürzen
 function diffShort(a, b, ctx=8){
   const o = diffSegs(a, b); if (!o) return esc(b);
@@ -208,7 +210,7 @@ function catFiltering(){ const c = S.cat; return !!(c.q || c.g || c.idx || c.sor
 function lawRow(r){
   return `<li><button data-open-law="${r.gnr}">
     <span class="lt">${esc(r.kurztitel)}${r.abk && r.abk!==r.kurztitel ? ` <span class="abk">${esc(r.abk)}</span>`:""}</span>
-    <span class="lm">${esc(r.typ)}${r.idx?" · "+esc(r.idx):""}${r.inkraft?" · seit "+fmtIso(r.inkraft):""}</span>
+    <span class="lm">${esc(r.typ)}${r.idx?" · "+esc(r.idx):""}${r.stf_year?" · Stammfassung "+r.stf_year:r.inkraft?" · seit "+fmtIso(r.inkraft):""}${r.n_changes?" · "+nf(r.n_changes)+" Änderungen":""}${r.n_celex?" · "+r.n_celex+" EU-Bezüge":""}</span>
     <span class="ln">${r.n_norms ? nf(r.n_norms)+" Normen" : ""}${r.nc ? ` <span class="pill s-diskutiert">${r.nc} ${r.nc===1?"Beitrag":"Beiträge"}</span>` : ""}</span>
   </button></li>`;
 }
@@ -216,7 +218,7 @@ function propCard(c){
   const st = c.stats, base = c.base || "";
   const who = c.author ? (c.author.role==="deleted" ? "Gelöschtes Konto" : c.author.name + (c.author.role==="bot" ? " · KI-Bot" : c.author.role==="org" ? " · Organisation" : "")) : "";
   return `<article class="pcard">
-    <div class="chead"><span class="pill ${statusCls(st.status)}">${st.status}</span>${isRepeal(c)?'<span class="pill del">Streichung</span>':''}${c.example?'<span class="vfy">Beispiel</span>':''}</div>
+    <div class="chead"><span class="pill ${statusCls(st.status)}">${st.status}</span>${isRepeal(c)?'<span class="pill del">Streichung</span>':''}${goldPill(c)}${c.example?'<span class="vfy">Beispiel</span>':''}</div>
     <a class="paddr" href="#/g/${esc(c.key)}">${esc(c.where || c.key)}</a>
     <div class="diff">${propDiff(c, base, true)}</div>
     ${c.why?`<p class="why clamp"><b>Begründung:</b> ${esc(c.why)}</p>`:""}
@@ -262,7 +264,7 @@ function renderHome(){
         <input id="catq" type="search" placeholder="Suchen: Titel oder Abkürzung, z. B. ASVG, Mietrecht" value="${esc(c.q)}" aria-label="Rechtsvorschrift suchen">
         <div class="seg" role="group" aria-label="Art">${GROUPS.map(([k,l]) => `<button data-g="${k}" aria-pressed="${c.g===k}">${l}</button>`).join("")}</div>
         <div class="selrow">
-          <select id="catsort" aria-label="Sortierung"><option value="">A–Z</option><option value="contrib" ${c.sort==="contrib"?"selected":""}>Meiste Beiträge</option><option value="norms" ${c.sort==="norms"?"selected":""}>Meiste Normen</option><option value="new" ${c.sort==="new"?"selected":""}>Zuletzt in Kraft getreten</option></select>
+          <select id="catsort" aria-label="Sortierung"><option value="">A–Z</option><option value="contrib" ${c.sort==="contrib"?"selected":""}>Meiste Beiträge</option><option value="norms" ${c.sort==="norms"?"selected":""}>Meiste Normen</option><option value="new" ${c.sort==="new"?"selected":""}>Zuletzt in Kraft getreten</option><option value="changes" ${c.sort==="changes"?"selected":""}>Am häufigsten geändert</option><option value="old" ${c.sort==="old"?"selected":""}>Älteste Stammfassung</option><option value="eu" ${c.sort==="eu"?"selected":""}>Meiste EU-Bezüge</option></select>
           <select id="catidx" aria-label="Sachgebiet"><option value="">Alle Sachgebiete</option>${(S.sach||[]).map(x => `<option value="${esc(x.idx)}" ${c.idx===x.idx?"selected":""}>${esc(x.idx)} (${x.n})</option>`).join("")}</select>
         </div>
       </div>
@@ -273,7 +275,7 @@ function renderHome(){
       : `
         <div class="lbl" style="margin-top:4px">Am meisten kommentiert</div>
         <ol class="laws">${top.length ? top.map(lawRow).join("") : `<li class="why" style="padding:10px 0">Noch keine Beiträge.</li>`}</ol>
-        <button class="linkbtn strong" id="catall">Alle ${syncing ? "" : nf(st.laws)+" "}Rechtsvorschriften</button>`}
+        <div class="row" style="display:flex;gap:16px;flex-wrap:wrap"><button class="linkbtn strong" id="catall">Alle ${syncing ? "" : nf(st.laws)+" "}Rechtsvorschriften</button><a class="linkbtn strong" href="#/zahlen">Das Recht in Zahlen</a></div>`}
     </section>
     <section class="hblock about" id="home-about" aria-labelledby="h-about">
       <div class="lbl">Über das Projekt</div>
@@ -318,6 +320,7 @@ function renderToc(){
   const loading = S.norms.filter(n => !n.loaded).length;
   $("toc").innerHTML = `<div class="lbl">${esc(S.law.typ)} · Gesetzesnummer ${S.law.gnr}</div>
     <div class="tochead">${esc(S.law.kurztitel)}</div>
+    ${lawMetaHtml(S.law)}
     <input id="tocq" type="search" placeholder="§ oder Stichwort" value="${esc(S.tocq)}" aria-label="Im Inhaltsverzeichnis suchen">
     <div class="why">${nf(S.norms.length)} Normen${loading?` · Überschriften werden geladen (${nf(loading)} offen)`:""}</div>
     <ol class="toclist">${list.map(n => { const c = countBy(n.pid), on = c ? Math.max(1, Math.round(c/max*5)) : 0;
@@ -326,6 +329,43 @@ function renderToc(){
       return `<button class="btn ghost" data-whole="${wk}">Ganze Rechtsvorschrift aufheben${nc?` (${nc})`:""}</button>`; })()}<button class="btn ghost" id="botsbtn">Zugelassene KI-Bots</button><a class="btn ghost" href="#/projekt/bewertung">So wird bewertet</a></div>`;
   const cur = $("toc").querySelector('[aria-current="true"]'); if (cur && !q) cur.scrollIntoView({block:"nearest"});
 }
+// Säulendiagramm: eine Reihe, ohne Legende (der Titel benennt sie), Tooltip je Säule, Tabelle als Alternative
+function barChart(data, o){
+  if (!data.length) return `<p class="why">Noch keine Daten. Der Katalog wird aus dem RIS geladen.</p>`;
+  const W = 760, H = 220, pl = 44, pr = 8, pt = 10, pb = 26, n = data.length;
+  const max = Math.max(...data.map(d => d[1])), step = niceStep(max), top = Math.ceil(max/step)*step || 1;
+  const bw = (W-pl-pr)/n, gap = Math.min(2, bw*.25), y = v => pt + (H-pt-pb)*(1 - v/top);
+  let g = "";
+  for (let v = 0; v <= top; v += step) g += `<line x1="${pl}" x2="${W-pr}" y1="${y(v)}" y2="${y(v)}" class="grid"/><text x="${pl-6}" y="${y(v)+4}" class="ax" text-anchor="end">${nf(v)}</text>`;
+  const bars = data.map((d,i) => {
+    const x = pl + i*bw + gap/2, w = Math.max(1, bw-gap), h = Math.max(0, y(0)-y(d[1])), r = Math.min(4, w/2, h);
+    const path = h ? `M${x},${y(0)} V${y(d[1])+r} Q${x},${y(d[1])} ${x+r},${y(d[1])} H${x+w-r} Q${x+w},${y(d[1])} ${x+w},${y(d[1])+r} V${y(0)} Z` : "";
+    const lab = (i % o.every===0 || n <= 10) ? `<text x="${x+w/2}" y="${H-8}" class="ax" text-anchor="middle">${esc(d[0])}</text>` : "";
+    return `<g class="bar" data-tip="${esc(d[2]||d[0])}: ${nf(d[1])} ${esc(o.unit)}"><rect x="${pl+i*bw}" y="${pt}" width="${bw}" height="${H-pt-pb}" class="hit"/>${path?`<path d="${path}"/>`:""}</g>${lab}`;
+  }).join("");
+  return `<figure class="chart"><svg viewBox="0 0 ${W} ${H}" role="img" aria-label="${esc(o.unit)} je ${n>20?"Jahr":"Zeitraum"}">${g}${bars}<line x1="${pl}" x2="${W-pr}" y1="${y(0)}" y2="${y(0)}" class="base"/></svg>
+    <details class="why"><summary>Als Tabelle</summary><table class="dt"><tbody>${data.map(d => `<tr><td>${esc(d[0])}</td><td class="num">${nf(d[1])}</td></tr>`).join("")}</tbody></table></details></figure>`;
+}
+function niceStep(max){ const raw = max/4, p = Math.pow(10, Math.floor(Math.log10(raw||1))), f = raw/p; return (f<=1?1:f<=2?2:f<=5?5:10)*p; }
+const tipEl = document.createElement("div"); tipEl.className = "charttip"; tipEl.hidden = true; document.body.appendChild(tipEl);
+document.addEventListener("mousemove", e => {
+  const b = e.target.closest && e.target.closest("g.bar");
+  if (!b){ tipEl.hidden = true; return; }
+  tipEl.textContent = b.dataset.tip; tipEl.hidden = false;
+  tipEl.style.left = Math.min(e.pageX + 12, window.scrollX + document.documentElement.clientWidth - tipEl.offsetWidth - 8) + "px"; tipEl.style.top = (e.pageY - 34) + "px";
+});
+function lawMetaHtml(law){
+  const m = law.metrics; if (!m) return "";
+  const bits = [];
+  if (m.stf_year) bits.push(`Stammfassung ${m.stf_year}`);
+  if (m.changes) bits.push(`${nf(m.changes)} ${m.changes===1?"Änderung":"Änderungen"}`);
+  if (m.last_change) bits.push(`zuletzt geändert durch ${esc(m.last_change)}`);
+  return `<div class="lawmeta why">${bits.join(" · ")}</div>
+    ${m.celex.length ? `<details class="eu"><summary>Setzt ${m.celex.length} EU-${m.celex.length===1?"Rechtsakt":"Rechtsakte"} um</summary>
+      <ul>${m.celex.map(x => `<li><a href="${esc(x.url)}" target="_blank" rel="noopener">${esc(x.id)}</a> <span class="why">${celexKind(x.id)}</span></li>`).join("")}</ul>
+      <div class="why">Geht eine Stelle über die EU-Vorgabe hinaus, beim Beitrag „Übererfüllt EU-Recht“ ankreuzen.</div></details>` : ""}`;
+}
+function celexKind(x){ const t = (x.match(/^\d\d{4}([A-Z]{1,2})/)||[])[1]; return {L:"Richtlinie", R:"Verordnung", D:"Beschluss"}[t] || ""; }
 function highlight(key, t){
   let html = esc(t);
   const quotes = S.data.filter(c => !c.removed && c.key===key && c.w).map(c => c.w.quote);
@@ -342,7 +382,7 @@ function renderNorm(){
   let html = `<div class="lawhead"><div class="kt"><span>Bundesrecht konsolidiert</span><span>${esc(S.law.kurztitel)}</span><span>${esc(lawKurz())}</span></div>
     ${heads.length?`<div class="heads">${heads.map(h => `<div>${esc(h.t)}</div>`).join("")}</div>`:""}
     <h1>${esc(n.label)}${pt?". "+esc(pt.t):""}</h1>
-    <div class="meta">In Kraft seit ${fmtIso(body.inkraft)} · <a href="https://www.ris.bka.gv.at/Dokumente/Bundesnormen/${body.nor}/${body.nor}.html" target="_blank" rel="noopener">im RIS ansehen</a>
+    <div class="meta">In Kraft seit ${fmtIso(body.inkraft)}${body.kundmachung?` · zuletzt geändert durch ${esc(body.kundmachung)}`:""}${body.words?` · ${nf(body.words)} Wörter`:""} · <a href="https://www.ris.bka.gv.at/Dokumente/Bundesnormen/${body.nor}/${body.nor}.html" target="_blank" rel="noopener">im RIS ansehen</a>
       · ${(() => { const wk = `${S.gnr}/${S.pid}/ganz`, nc = S.data.filter(x => !x.removed && x.key===wk).length;
         return `<button class="linkbtn subtle ${S.sel===wk?"on":""}" data-whole="${esc(wk)}">Ganzen ${esc(n.label)} streichen${nc?` (${nc} ${nc===1?"Vorschlag":"Vorschläge"})`:""}</button>`; })()}</div></div>
     <p class="hint">Absatz oder Ziffer anklicken, um Beiträge zu sehen. Wörter mit der Maus markieren, um genau diese Wörter zu kommentieren.</p>`;
@@ -423,7 +463,7 @@ function cardHtml(c, opts={}){
   const cur = unitOf(c.key), base = c.base || (cur && cur.t) || "";
   const changed = cur && c.base && cur.t !== c.base;
   return `<article class="card">
-    <div class="chead"><span class="pill ${c.type==="prop"?(isRepeal(c)?"del":"prop"):"com"}">${c.type==="prop"?propKind(c):"Kommentar"}</span><span class="pill ${statusCls(c.stats.status)}">${c.stats.status}</span>${c.example?'<span class="vfy">Beispiel</span>':''}${own?'<span class="vfy">Ihr Beitrag</span>':''}${c.via==="api"?'<span class="vfy">über API</span>':''}</div>
+    <div class="chead"><span class="pill ${c.type==="prop"?(isRepeal(c)?"del":"prop"):"com"}">${c.type==="prop"?propKind(c):"Kommentar"}</span><span class="pill ${statusCls(c.stats.status)}">${c.stats.status}</span>${c.example?'<span class="vfy">Beispiel</span>':''}${own?'<span class="vfy">Ihr Beitrag</span>':''}${c.via==="api"?'<span class="vfy">über API</span>':''}${goldPill(c)}</div>
     <div class="chead">${authorHtml(c.author)}</div>
     ${opts.showAddr?`<div class="addr" data-goto="${esc(c.key)}">${esc(c.where || c.key)}</div>`:""}
     ${c.w?`<div><span class="wq">„${esc(c.w.quote)}“</span></div>`:""}
@@ -463,7 +503,8 @@ function renderPanel(){
   items.sort((a,b) => (b.stats.pw && a.stats.pw ? a.stats.pw.rank-b.stats.pw.rank : 0) || b.stats.score - a.stats.score);
   const props = S.data.filter(c => c.key===S.sel && c.type==="prop" && !c.removed);
   const exc = S.w ? esc(u.t).replace(esc(S.w.quote), "<mark>"+esc(S.w.quote)+"</mark>") : esc(u.t);
-  let html = `<div class="ph"><div class="lbl">${esc(unitLabel(S.sel))} · ${esc(lawKurz())}</div><div class="addr">${esc(addrOf(S.sel, S.w))}</div><p class="excerpt">${exc}</p></div>
+  let html = `<div class="ph"><div class="lbl">${esc(unitLabel(S.sel))} · ${esc(lawKurz())}</div><div class="addr">${esc(addrOf(S.sel, S.w))}</div><p class="excerpt">${exc}</p>
+    ${u.whole!=="gesetz" ? `<details class="refs" data-refs="${esc(S.sel)}" ${S.refsOpen===S.sel?"open":""}><summary>Folgenprüfung: Wer verweist auf diese Stelle?</summary><div class="refbox">${refsHtml(S.sel)}</div></details>` : ""}</div>
     <div class="tools"><div class="seg" role="group" aria-label="Filter">${[["all","Alle"],["prop","Vorschläge"],["com","Kommentare"]].map(([k,l])=>`<button data-filter="${k}" aria-pressed="${S.filter===k}">${l}</button>`).join("")}</div>
     <label><input type="checkbox" id="showbots" ${S.showBots?"checked":""}> Bot-Beiträge zeigen</label></div>`;
   if (props.length >= 2 && S.user && S.user.can_rate){
@@ -479,6 +520,25 @@ function renderPanel(){
   html += formHtml(u);
   panel.innerHTML = html;
 }
+function refsHtml(key){
+  const r = (S.refs||{})[key];
+  if (!r) return `<div class="why">Wird gesucht … (Normtext dieses Gesetzes und RIS-Volltextsuche, einige Sekunden)</div>`;
+  if (r.error) return `<div class="why">${esc(r.error)}</div>`;
+  const li = x => `<li><a href="${x.same_law ? "#/g/"+esc(x.key) : esc(x.url.replace(location.origin,""))}">${esc(x.address)}</a>${x.snippet?`<div class="why">${esc(x.snippet)}</div>`:""}</li>`;
+  return `<div class="lbl">Im selben Gesetz (${r.internal.length})</div>
+    ${r.internal.length ? `<ul class="reflist">${r.internal.slice(0, 60).map(li).join("")}</ul>` : `<div class="why">Keine Verweise gefunden.</div>`}
+    ${r.internal_complete ? "" : `<div class="why">Noch nicht alle Normen geladen (${r.norms_loaded} von ${r.norms_total}). Später erneut öffnen.</div>`}
+    <div class="lbl" style="margin-top:8px">In anderen Rechtsvorschriften (${r.external.length})</div>
+    ${r.external.length ? `<ul class="reflist">${r.external.map(li).join("")}</ul>` : `<div class="why">Keine Verweise gefunden.</div>`}
+    <div class="why" style="margin-top:6px">${esc(r.note)}</div>`;
+}
+async function loadRefs(key){
+  S.refs = S.refs || {}; S.refsOpen = key;
+  if (S.refs[key] && !S.refs[key].error) return;
+  try { S.refs[key] = await api("/api/references?key="+encodeURIComponent(key)); } catch(e){ S.refs[key] = {error:e.message}; }
+  const box = document.querySelector(`details.refs[data-refs="${CSS.escape(key)}"] .refbox`); if (box) box.innerHTML = refsHtml(key);
+}
+document.addEventListener("toggle", e => { const d = e.target; if (d.matches && d.matches("details.refs")){ if (d.open) loadRefs(d.dataset.refs); else if (S.refsOpen===d.dataset.refs) S.refsOpen = null; } }, true);
 function renderWelcome(panel){
   const all = S.all || [];
   const props = all.filter(c => c.type==="prop").sort((a,b) => b.stats.score - a.stats.score).slice(0,4);
@@ -505,10 +565,17 @@ function formHtml(u){
       : ft==="del" ? `<div class="note-box">${u.whole==="gesetz" ? `Vorschlag: <b>${esc(S.law.kurztitel)}</b> wird zur Gänze aufgehoben.` : `Vorschlag: <b>${esc(unitLabel(S.sel))}</b> entfällt ersatzlos.`} Der Novellierungstext wird automatisch erzeugt.</div>
         <label class="lbl" for="pwhy">Begründung (Pflicht)</label><textarea id="pwhy" placeholder="Warum ist die Regel entbehrlich? Was wird einfacher, billiger oder freier?"></textarea>`
       : `<label class="lbl" for="ctext">Kommentar</label><textarea id="ctext" placeholder="Was ist an dieser Stelle unklar, überholt oder unnötig?"></textarea>`}
+    ${goldHtml()}
     ${me.role==="bot"?`<div class="note-box bot">Der Beitrag erscheint mit dem Bot-Profil aus Ihrer Registrierung (Auftraggeber, Auftrag, Betreiber, Modell).</div>`:""}
     <div class="err" id="ferr" hidden></div>
     <div class="row"><button class="btn" type="submit">Veröffentlichen</button></div>
   </form>`;
+}
+function goldHtml(){
+  const cx = (S.law && S.law.metrics && S.law.metrics.celex) || [];
+  return `<label class="chk"><input type="checkbox" id="fgold" ${S.gold?"checked":""}> Übererfüllt EU-Recht (Gold-Plating): Die Stelle verlangt mehr, als das EU-Recht vorgibt</label>
+    <div class="goldsel" ${S.gold?"":"hidden"}>${cx.length ? `<select id="fcelex" aria-label="EU-Rechtsakt"><option value="">EU-Rechtsakt wählen (optional)</option>${cx.map(x => `<option value="${esc(x.id)}">${esc(x.id)} ${celexKind(x.id)}</option>`).join("")}</select>`
+      : `<input id="fcelex" placeholder="CELEX-Nummer (optional), z. B. 32006L0123">`}</div>`;
 }
 function backBtn(){ return `<button class="btn ghost" data-back>${S.mode==="law"?"Zurück zum Normtext":"Schließen"}</button>`; }
 
@@ -708,6 +775,47 @@ function renderPage(){
       </article>`;
     }
   }
+  else if (S.page==="zahlen"){
+    const z = S.zahlen || {};
+    if (z.error) html = `<article class="legal doc"><h1>Das Recht in Zahlen</h1><p>${esc(z.error)}</p></article>`;
+    else {
+      const lawLink = r => `<a href="#/g/${r.gnr}">${esc(r.abk || r.kurztitel)}</a>`;
+      const topTable = (rows, col, fmt) => `<table class="dt"><tbody>${rows.map((r,i) => `<tr><td>${i+1}.</td><td>${lawLink(r)}<div class="why">${esc(r.kurztitel)}</div></td><td class="num">${fmt(r[col], r)}</td></tr>`).join("")}</tbody></table>`;
+      const yrs = z.by_year || [], peak = yrs.reduce((a,b) => b[1] > a[1] ? b : a, [0,0]);
+      html = `<article class="legal doc zahlen"><div class="lbl">Bundesrecht, geltende Fassung</div><h1>Das Recht in Zahlen</h1>
+      <p>Wie viel Recht gilt in Österreich, wie alt ist es und wie oft wird es geändert? Alle Zahlen stammen aus dem Rechtsinformationssystem des Bundes (RIS) und werden wöchentlich aktualisiert.</p>
+      <div class="hero">
+        <div><b>${nf(z.laws)}</b><span>geltende Rechtsvorschriften</span></div>
+        <div><b>${nf(z.norms)}</b><span>Normen (Paragraphen, Artikel, Anlagen)</span></div>
+        <div><b>${nf(z.changes)}</b><span>Änderungen seit Erlassung</span></div>
+        <div><b>${nf(z.celex)}</b><span>umgesetzte EU-Rechtsakte in ${nf(z.laws_with_eu)} Rechtsvorschriften</span></div>
+      </div>
+      <h2>Änderungen pro Jahr</h2>
+      <p class="why">Wie oft geltende Rechtsvorschriften im Bundesgesetzblatt geändert wurden, nach Jahr der Änderung. Eine Sammelnovelle, die mehrere Gesetze ändert, zählt bei jedem Gesetz. Spitzenjahr: ${peak[0]} mit ${nf(peak[1])} Änderungen.</p>
+      ${barChart(yrs, {unit:"Änderungen", every:5})}
+      <h2>Wie alt das geltende Recht ist</h2>
+      <p class="why">Geltende Rechtsvorschriften nach Jahrzehnt ihrer Stammfassung.</p>
+      ${barChart((z.by_decade||[]).map(([d,n]) => [String(d), n, d+"er Jahre"]), {unit:"Rechtsvorschriften", every:3})}
+      <h2>Ranglisten</h2>
+      <div class="tops">
+        <section><h3>Am häufigsten geändert</h3>${topTable(z.top_changes||[], "n_changes", v => nf(v)+" ×")}</section>
+        <section><h3>Älteste Stammfassung</h3>${topTable(z.top_old||[], "stf_year", v => v)}</section>
+        <section><h3>Meiste Normen</h3>${topTable(z.top_norms||[], "n_norms", v => nf(v))}</section>
+        <section><h3>Meiste EU-Bezüge</h3>${topTable(z.top_eu||[], "n_celex", v => nf(v))}</section>
+      </div>
+      <h2>Auf Offenes Recht</h2>
+      <div class="hero small">
+        <div><b>${nf(z.proposals)}</b><span>Änderungsvorschläge</span></div>
+        <div><b>${nf(z.repeals)}</b><span>davon Streichungen</span></div>
+        <div><b>${nf(z.packages)}</b><span>Reformpakete</span></div>
+        <div><b>${nf((z.gold||[]).length)}</b><span>gemeldete Übererfüllungen von EU-Recht</span></div>
+      </div>
+      <h2 id="z-gold">Übererfüllung von EU-Recht</h2>
+      <p class="why">Stellen, an denen österreichisches Recht nach Ansicht der Beitragenden mehr verlangt, als das EU-Recht vorgibt (Gold-Plating). Markieren lässt sich das bei jedem Beitrag.</p>
+      ${(z.gold||[]).length ? `<div class="list">${z.gold.map(c => cardHtml(c, {showAddr:true, compact:true})).join("")}</div>` : `<p class="why">Bisher keine Meldungen.</p>`}
+      </article>`;
+    }
+  }
   else if (S.page==="moderation"){
     const m = S.modlog || {removed:[], stats:{}}, st = m.stats || {};
     html = `<article class="legal doc"><div class="lbl">Transparenz</div><h1>Moderationsprotokoll</h1>
@@ -741,6 +849,7 @@ function renderPage(){
       ["post_comment","Kommentar an einer Stelle veröffentlichen, optional zu einem wörtlichen Zitat","ja"],
       ["propose_amendment","Neuen Wortlaut mit Begründung vorschlagen","ja"],
       ["propose_repeal","Ersatzlose Streichung vorschlagen: Stelle, ganzer Paragraph (…/p74/ganz) oder ganze Rechtsvorschrift (…/gesetz/ganz)","ja"],
+      ["find_references","Folgenprüfung: Stellen im selben Gesetz und in anderen Rechtsvorschriften, die auf eine Stelle verweisen",""],
       ["list_packages","Reformpakete mit Bewertung",""],
       ["get_package","Reformpaket mit Vorschlägen und Gesetzesentwurf",""],
       ["create_package","Vorschläge zu einem Reformpaket bündeln","ja"],
@@ -754,6 +863,7 @@ function renderPage(){
       ["GET","/api/v1/contributions/{id}","Einzelner Beitrag",""],
       ["GET","/api/v1/proposals/top?gnr=","Top-Vorschläge",""],
       ["POST","/api/v1/contributions","Kommentar, Vorschlag oder Streichung (type: repeal) veröffentlichen","ja"],
+      ["GET","/api/v1/references?key=","Folgenprüfung: Verweise auf eine Stelle",""],
       ["GET","/api/v1/packages","Reformpakete",""],
       ["GET","/api/v1/packages/{id}","Reformpaket mit Gesetzesentwurf",""],
       ["POST","/api/v1/packages","Reformpaket schnüren","ja"],
@@ -862,6 +972,7 @@ curl -X POST "${O}/api/v1/contributions" \\
       <tr><td><code>votes</code>, <code>yes</code>, <code>partly</code>, <code>no</code></td><td>Anzahl der Stimmen</td></tr>
       <tr><td><code>pairwise.rank</code></td><td>Rang unter konkurrierenden Formulierungen derselben Stelle (Bradley-Terry)</td></tr>
       <tr><td><code>base_text</code>, <code>norm_changed_since</code></td><td>Wortlaut, auf den sich ein Vorschlag bezieht, und ob eine Novelle die Stelle seither geändert hat</td></tr>
+      <tr><td><code>goldplating</code></td><td>gesetzt, wenn der Beitrag eine Übererfüllung von EU-Recht meldet, mit CELEX-Nummer und EUR-Lex-Link; beim Schreiben <code>"goldplating": true, "celex": "32006L0123"</code>, beim Lesen Filter <code>goldplating=true</code></td></tr>
       <tr><td><code>operation</code>, <code>amendment_instruction</code></td><td><code>replace</code> oder <code>repeal</code>; die Novellierungsanordnung im legistischen Format, z. B. „In § 74 Abs. 2 wird die Wortfolge „…“ durch die Wortfolge „…“ ersetzt.“</td></tr></tbody></table>
     <p>Bewertungen sind nur als Summen abrufbar, nie einzeln oder personenbezogen.</p>
     <p class="why">Normtexte: Rechtsinformationssystem des Bundes (RIS), Bundeskanzleramt, offene Daten. Rechtlich verbindlich ist ausschließlich die Kundmachung im Bundesgesetzblatt.</p></article>`;
@@ -1054,6 +1165,7 @@ document.addEventListener("keydown", e => {
 document.addEventListener("keydown", e => { const u = e.target.closest && e.target.closest(".unit"); if (u && (e.key==="Enter"||e.key===" ")){ e.preventDefault(); selectUnit(u.dataset.key); } });
 document.addEventListener("change", async e => {
   if (e.target.id==="showbots"){ S.showBots = e.target.checked; renderPanel(); }
+  if (e.target.id==="fgold"){ S.gold = e.target.checked; const b = document.querySelector(".goldsel"); if (b) b.hidden = !S.gold; }
   if (e.target.name==="pkg"){ const box = e.target.form.querySelector(".newpkg"); if (box) box.hidden = e.target.value!=="new"; }
   if (e.target.id==="catsort"){ S.cat.sort = e.target.value; await loadCatalog(true); renderHome(); }
   if (e.target.id==="catidx"){ S.cat.idx = e.target.value; await loadCatalog(true); renderHome(); }
@@ -1173,7 +1285,8 @@ document.addEventListener("submit", async e => {
   if (id==="form"){
     const err = $("ferr"); const fail = m => { err.textContent = m; err.hidden = false; };
     const u = unitOf(S.sel);
-    const body = {key:S.sel, type:S.formType==="del" ? "prop" : S.formType, w:S.formType==="del" ? null : S.w};
+    const body = {key:S.sel, type:S.formType==="del" ? "prop" : S.formType, w:S.formType==="del" ? null : S.w,
+                  gold:!!($("fgold")||{}).checked, celex:($("fcelex")||{}).value || null};
     if (S.formType==="del"){
       body.op = "repeal"; body.why = v("pwhy");
       if (body.why.length < 10) return fail("Bitte begründen Sie die Streichung in mindestens einem Satz.");
@@ -1186,7 +1299,7 @@ document.addEventListener("submit", async e => {
       body.text = v("ctext");
       if (body.text.length < 5) return fail("Bitte schreiben Sie mindestens einen kurzen Satz.");
     }
-    try { await api("/api/contributions", body); S.filter="all"; await refresh(); toast("Veröffentlicht"); }
+    try { await api("/api/contributions", body); S.filter="all"; S.gold = false; await refresh(); toast("Veröffentlicht"); }
     catch(x){ fail(x.message); }
   }
 });
