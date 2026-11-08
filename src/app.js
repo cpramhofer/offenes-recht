@@ -205,7 +205,7 @@ function renderAcct(){
   const pend = u.role==="bot" && u.status==="pending" ? `<span class="pill pend">wartet auf Zulassung</span>` :
                u.role==="bot" && u.status!=="active" ? `<span class="pill s-umstritten">nicht zugelassen</span>` : "";
   el.innerHTML = `<span class="nm">${esc(u.name)}</span><span class="pill ${u.role==="bot"?"bot":"role"}">${ROLE_NAMES[u.role]}</span>${pend}
-    ${u.gremium?`<button class="btn ghost" id="grembtn">Zulassungsgremium</button>`:""}
+    ${u.gremium?`<button class="btn ghost" id="grembtn" title="Zulassungsgremium">Gremium</button>`:""}
     <button class="btn ghost" id="acctbtn">Mein Konto</button><button class="btn ghost" id="logoutbtn">Abmelden</button>`;
 }
 function renderShell(){
@@ -348,7 +348,7 @@ function renderToc(){
   $("toc").innerHTML = `<div class="lbl">${isDraftLaw() ? `Ministerialentwurf ${esc(S.law.abk)}` : `${esc(S.law.typ)} · Gesetzesnummer ${S.law.gnr}`}</div>
     <div class="tochead">${esc(S.law.kurztitel)}</div>
     ${isDraftLaw() ? (dr ? `<div class="lawmeta why">${esc(dr.ministry||"")} · Begutachtung bis <b>${fmtIso(dr.deadline)}</b>${(() => { const l = daysLeft(dr.deadline); return l!==null && l>=0 ? ` (noch ${l} ${l===1?"Tag":"Tage"})` : " (abgelaufen)"; })()} · <a href="${esc(dr.parliament_url)}" target="_blank" rel="noopener">beim Parlament</a></div>` : "") : lawMetaHtml(S.law)}
-    <div class="followrow">${followBtn("law", S.law.gnr, "btn ghost")}<a class="linkbtn subtle" href="/feed/gesetz/${S.law.gnr}.xml" target="_blank" rel="noopener" title="RSS-Feed der Beiträge">RSS</a></div>
+    <div class="followrow">${followBtn("law", S.law.gnr, "btn ghost")}${shareBtn("/e/"+S.law.gnr)}<a class="linkbtn subtle" href="/feed/gesetz/${S.law.gnr}.xml" target="_blank" rel="noopener" title="RSS-Feed der Beiträge">RSS</a></div>
     <input id="tocq" type="search" placeholder="§ oder Stichwort" value="${esc(S.tocq)}" aria-label="Im Inhaltsverzeichnis suchen">
     <div class="why">${nf(S.norms.length)} Normen${loading?` · Überschriften werden geladen (${nf(loading)} offen)`:""}</div>
     <ol class="toclist">${list.map(n => { const c = countBy(n.pid), on = c ? Math.max(1, Math.round(c/max*5)) : 0;
@@ -458,8 +458,9 @@ function rateHtml(c){
 }
 const REASONS = [["illegal","Rechtswidriger Inhalt"],["attack","Persönlicher Angriff"],["spam","Spam oder Werbung"],["offtopic","Kein Bezug zur Norm"],["bot","Nicht gekennzeichneter Bot"],["other","Sonstiger Verstoß gegen die Regeln"]];
 function reasonSelect(name){ return `<select name="${name}" required><option value="">Grund wählen …</option>${REASONS.map(([k,l]) => `<option value="${k}">${l}</option>`).join("")}</select>`; }
+function shareBtn(path, cls="linkbtn subtle"){ return `<button class="${cls}" data-share="${esc(path)}">Teilen</button>`; }
 function modTools(c, own){
-  const u = S.user; if (!u) return "";
+  const u = S.user; if (!u) return `<div class="modlinks">${shareBtn(c.id > 0 ? "/v/"+c.id : "/p/"+(-c.id))}</div>`;
   const f = S.formFor && S.formFor.cid===c.id ? S.formFor.kind : null;
   if (f==="report") return `<form class="modform" data-reportform="${c.id}"><div class="lbl">Beitrag melden</div>${reasonSelect("reason")}
       <textarea name="note" placeholder="Was verstößt gegen die Regeln? (bei „Sonstiges“ Pflicht)"></textarea>
@@ -477,7 +478,7 @@ function modTools(c, own){
   if (f==="remove") return `<form class="modform" data-removeform="${c.id}"><div class="lbl">Beitrag entfernen (Gremium)</div>${reasonSelect("reason")}
       <textarea name="note" placeholder="Begründung (Pflicht, wird öffentlich am Beitrag vermerkt)"></textarea>
       <div class="row"><button class="btn" type="submit">Entfernen</button><button class="btn ghost" type="button" data-formclose>Abbrechen</button></div></form>`;
-  return `<div class="modlinks">${c.id > 0 ? followBtn("c", c.id) : followBtn("pkg", -c.id)}${c.type==="prop" && u.can_post ? `<button class="linkbtn subtle" data-pkgadd="${c.id}">Zu Paket</button>` : ""}${own ? "" : `<button class="linkbtn subtle" data-report="${c.id}">Melden</button>`}${u.gremium ? `<button class="linkbtn subtle" data-remove="${c.id}">Entfernen</button>` : ""}</div>`;
+  return `<div class="modlinks">${shareBtn(c.id > 0 ? "/v/"+c.id : "/p/"+(-c.id))}${c.id > 0 ? followBtn("c", c.id) : followBtn("pkg", -c.id)}${c.type==="prop" && u.can_post ? `<button class="linkbtn subtle" data-pkgadd="${c.id}">Zu Paket</button>` : ""}${own ? "" : `<button class="linkbtn subtle" data-report="${c.id}">Melden</button>`}${u.gremium ? `<button class="linkbtn subtle" data-remove="${c.id}">Entfernen</button>` : ""}</div>`;
 }
 function removedCard(c, opts){
   return `<article class="card removed"><div class="chead"><span class="pill s-umstritten">Beitrag entfernt</span><span class="vfy">${fmtDate(c.removed.at)}</span></div>
@@ -671,7 +672,8 @@ function renderAccount(panel){
 }
 async function renderGremium(panel){
   if (!S.user || !S.user.gremium){ S.panel="default"; return renderPanel(); }
-  if (!S.gremium){ panel.innerHTML = `<div class="empty">Lade …</div>`; try { S.gremium = await api("/api/gremium/pending"); } catch(e){ panel.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; } }
+  if (!S.gremium){ panel.innerHTML = `<div class="empty">Lade …</div>`; try { [S.gremium, S.anom] = await Promise.all([api("/api/gremium/pending"), api("/api/gremium/anomalies")]); } catch(e){ panel.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; } }
+  const an = S.anom || {findings:[], held_accounts:0};
   const g = S.gremium;
   const card = p => p.role==="bot" ? `<article class="card gcard"><div class="chead"><span class="who">${esc(p.name)}</span><span class="pill bot">KI-Bot</span><span class="vfy">beantragt ${fmtDate(p.created)} · ${esc(p.email)}</span></div>
       <dl class="botbox"><dt>Auftraggeber</dt><dd>${esc(p.bot.principal)}</dd><dt>Auftrag</dt><dd>${esc(p.bot.mandate)}</dd><dt>Betreiber</dt><dd>${esc(p.bot.operator)}</dd><dt>Modell</dt><dd>${esc(p.bot.model)}</dd></dl>
@@ -680,7 +682,13 @@ async function renderGremium(panel){
     : `<article class="card gcard"><div class="chead"><span class="who">${esc(p.name)}</span><span class="pill role">Organisation</span><span class="vfy">${esc(p.register)} · ${esc(p.email)}</span></div>
       <textarea id="note-${p.id}" placeholder="Notiz zur Prüfung (optional)"></textarea>
       <div class="row"><button class="btn" data-decide="${p.id}" data-d="verify">Als geprüft markieren</button><button class="btn ghost" data-decide="${p.id}" data-d="reject">Sperren</button></div></article>`;
-  const names = {approve:"zugelassen", reject:"abgelehnt", revoke:"entzogen", verify:"geprüft", limit:"Limit geändert:", profile:"Profil geändert:", remove:"Beitrag entfernt:", dismiss:"Meldung zurückgewiesen:", restore:"Beitrag wiederhergestellt:"};
+  const names = {approve:"zugelassen", reject:"abgelehnt", revoke:"entzogen", verify:"geprüft", limit:"Limit geändert:", profile:"Profil geändert:", remove:"Beitrag entfernt:", dismiss:"Meldung zurückgewiesen:", restore:"Beitrag wiederhergestellt:", hold:"Stimmen ausgesetzt:", unhold:"Stimmen wieder gezählt:", "anomaly-ok":"Auffälligkeit unbedenklich:"};
+  const anRow = a => `<article class="card gcard"><div class="chead"><span class="pill ${a.review ? "s-neu" : "s-umstritten"}">${esc(a.kind)}</span>${a.review ? `<span class="vfy">${a.review.decision==="held"?"Stimmen ausgesetzt":"als unbedenklich eingestuft"} am ${fmtDate(a.review.at)}</span>` : ""}</div>
+      <div class="body" style="font-size:13px">${esc(a.detail)}</div>
+      <details class="botd"><summary>${a.accounts.length} Konten</summary><ul class="reflist">${a.accounts.map(x => `<li>${esc(x.name)} <span class="why">angelegt ${fmtDate(x.created)}${x.held?" · Stimmen ausgesetzt":""}</span></li>`).join("")}</ul></details>
+      ${a.items.length ? `<div class="why">Betrifft Beitrag ${a.items.map(i => `<a href="/v/${i}">${i}</a>`).join(", ")}</div>` : ""}
+      ${a.review ? "" : `<form class="modform" data-holdform="${a.id}" data-ids="${a.accounts.map(x => x.id).join(",")}"><textarea name="note" placeholder="Begründung (Pflicht, wird protokolliert)"></textarea>
+        <div class="row"><button class="btn" type="submit" name="hold" value="1">Stimmen dieser Konten aussetzen</button><button class="btn ghost" type="submit" name="hold" value="0">Unbedenklich</button></div></form>`}</article>`;
   const repRow = r => `<article class="card gcard"><div class="chead"><span class="pill s-umstritten">${r.count} ${r.count===1?"Meldung":"Meldungen"}</span><span class="vfy">${r.reasons.map(esc).join(", ")}</span></div>
       ${r.cid < 0 ? `<div class="addr"><a href="#/paket/${-r.cid}">${esc(r.where)}</a></div>` : `<div class="addr" data-goto="${esc(r.key)}">${esc(r.where)}</div>`}
       <div class="body" style="font-size:13px">${esc(r.text)}${r.text.length>=600?" …":""}</div>
@@ -704,6 +712,8 @@ async function renderGremium(panel){
     <div class="list">${g.pending.length ? g.pending.map(card).join("") : `<div class="empty">Keine offenen Anträge.</div>`}</div>
     <div class="ph"><div class="lbl">Gemeldete Beiträge (${(g.reports||[]).length})</div><p class="why" style="margin:4px 0 0">Entfernt werden nur rechtswidrige Inhalte, persönliche Angriffe, Spam und nicht gekennzeichnete Bots. Meinungen bleiben stehen. Jede Entscheidung erscheint im <a href="#/moderation">Moderationsprotokoll</a>.</p></div>
     <div class="list">${(g.reports||[]).length ? g.reports.map(repRow).join("") : `<div class="empty">Keine offenen Meldungen.</div>`}</div>
+    <div class="ph"><div class="lbl">Auffällige Bewertungsmuster (${an.findings.filter(a => !a.review).length} offen)</div><p class="why" style="margin:4px 0 0">Ohne ID Austria lassen sich Mehrfachkonten nicht ausschließen. Erkannt werden Registrierungs- und Stimmenwellen, einseitige Unterstützung und gleichförmig abstimmende Gruppen. Ausgesetzte Stimmen zählen nicht, bleiben aber gespeichert und können wieder gezählt werden. Derzeit ausgesetzt: ${an.held_accounts} Konten.</p></div>
+    <div class="list">${an.findings.length ? an.findings.map(anRow).join("") : `<div class="empty">Keine Auffälligkeiten.</div>`}</div>
     <div class="ph"><div class="lbl">Zugelassene Bots und Schreib-Limits</div><p class="why" style="margin:4px 0 0">Standard: ${g.defaults.per_hour} pro Stunde, ${g.defaults.per_day} pro Tag.</p></div>
     <div class="list">${(g.bots||[]).length ? g.bots.map(botRow).join("") : `<div class="empty">Noch keine Bots zugelassen.</div>`}</div>
     <div class="ph"><div class="lbl">Protokoll</div></div>
@@ -772,7 +782,7 @@ function renderPage(){
     <p>KI-Bots können Querverweise prüfen, totes Recht finden und Folgeänderungen vorschlagen, wofür menschliche Kapazität fehlt. Sie sind willkommen, unter klaren Regeln: Ein Zulassungsgremium prüft jeden Bot; Auftraggeber, Auftrag, Betreiber und Modell sind öffentlich; jeder Bot-Beitrag ist gekennzeichnet; Bots bewerten nicht; der Auftraggeber verantwortet jeden Beitrag wie einen eigenen. Zugang über die <a href="#/api">API und den MCP-Server</a>.</p>
 
     <h2 id="p-pilot">Pilotbetrieb</h2>
-    <p>Offenes Recht ist ein Prototyp. Die Anmeldung erfolgt vorerst mit E-Mail-Adresse; die Verifizierung über ID Austria folgt. Bis dahin sind Stimmen noch nicht gegen Mehrfachkonten geschützt. Rechtlich verbindlich ist ausschließlich die Kundmachung im Bundesgesetzblatt.</p>
+    <p>Offenes Recht ist ein Prototyp. Die Anmeldung erfolgt vorerst mit E-Mail-Adresse; die Verifizierung über ID Austria folgt. Bis dahin sind Stimmen nicht vollständig gegen Mehrfachkonten geschützt; das Gremium prüft auffällige Bewertungsmuster und kann Stimmen aussetzen (siehe <a href="#/moderation">Moderation</a>). Rechtlich verbindlich ist ausschließlich die Kundmachung im Bundesgesetzblatt.</p>
     <div class="row" style="display:flex;gap:8px;flex-wrap:wrap;margin-top:16px">${S.user ? "" : `<button class="btn" data-open="register">Registrieren</button>`}<a class="btn ghost" href="#/">Zur Startseite</a></div></article>`;
   }
   else if (S.page==="paket"){
@@ -865,7 +875,12 @@ function renderPage(){
       <tr><td>bestätigt (Beitrag entfernt)</td><td>${nf(st.reports_upheld)}</td></tr>
       <tr><td>zurückgewiesen</td><td>${nf(st.reports_dismissed)}</td></tr>
       <tr><td>Beiträge derzeit entfernt</td><td>${nf(st.removed)}</td></tr>
-      <tr><td>Wiederherstellungen</td><td>${nf(st.restored)}</td></tr></tbody></table>
+      <tr><td>Wiederherstellungen</td><td>${nf(st.restored)}</td></tr>
+      <tr><td>Konten mit ausgesetzten Stimmen</td><td>${nf(st.held_accounts)}</td></tr>
+      <tr><td>davon nicht gezählte Bewertungen</td><td>${nf(st.held_ratings)}</td></tr></tbody></table>
+    <h2>Schutz der Bewertungen</h2>
+    <p>Solange die Anmeldung ohne ID Austria läuft, prüft das Gremium auffällige Bewertungsmuster: viele neue Konten in kurzer Zeit, Stimmenwellen auf einzelne Beiträge, Konten, die nur eine Person unterstützen, und Gruppen, die immer gleich abstimmen. Bestätigt sich ein Verdacht, werden die Stimmen dieser Konten ausgesetzt: Sie zählen nicht, bleiben aber gespeichert. IP-Adressen werden dafür nicht verwendet.</p>
+    ${(m.holds||[]).length ? `<table class="dt"><thead><tr><th>Datum</th><th>Entscheidung</th></tr></thead><tbody>${m.holds.map(h => `<tr><td>${fmtDate(h.at)}</td><td>${esc(h.note||"")}</td></tr>`).join("")}</tbody></table>` : `<p class="why">Bisher wurden keine Stimmen ausgesetzt.</p>`}
     <h2>Entfernte Beiträge</h2>
     ${m.removed.length ? `<table class="dt"><thead><tr><th>Datum</th><th>Stelle</th><th>Art</th><th>Grund</th></tr></thead><tbody>${m.removed.map(r => `<tr><td>${fmtDate(r.at)}</td><td><a href="${r.type==="package" ? "#/paket/"+(-r.id) : "#/g/"+esc(r.key)}">${esc(r.where)}</a></td><td>${r.type==="proposal"?"Vorschlag":r.type==="package"?"Reformpaket":"Kommentar"}</td><td><b>${esc(r.reason)}</b>${r.note?": "+esc(r.note):""}${S.user && S.user.gremium ? `<details class="botd"><summary>Wiederherstellen</summary><form class="modform" data-restoreform="${r.id}"><textarea name="note" placeholder="Begründung (Pflicht, wird protokolliert)"></textarea><div class="row"><button class="btn ghost" type="submit">Wiederherstellen</button></div></form></details>`:""}</td></tr>`).join("")}</tbody></table>` : `<p class="why">Bisher wurde kein Beitrag entfernt.</p>`}
     </article>`;
@@ -1120,6 +1135,17 @@ function stellungnahme(){
   out.push(`Stellungnahmen werden beim Parlament eingebracht: ${dr.parliament_url || ""}`);
   return out.join("\n");
 }
+async function share(path){
+  const url = location.origin + path;
+  if (navigator.share && window.matchMedia("(pointer:coarse)").matches){ try { await navigator.share({url, title:"Offenes Recht"}); return; } catch(e){ if (e.name==="AbortError") return; } }
+  const u = encodeURIComponent(url), txt = encodeURIComponent("Auf Offenes Recht: ");
+  $("shareurl").value = url;
+  $("sharelinks").innerHTML = [["E-Mail", `mailto:?subject=${encodeURIComponent("Offenes Recht")}&body=${u}`], ["WhatsApp", `https://wa.me/?text=${txt}${u}`],
+    ["LinkedIn", `https://www.linkedin.com/sharing/share-offsite/?url=${u}`], ["X", `https://x.com/intent/post?url=${u}`],
+    ["Bluesky", `https://bsky.app/intent/compose?text=${txt}${u}`], ["Facebook", `https://www.facebook.com/sharer/sharer.php?u=${u}`]]
+    .map(([l, h]) => `<a class="btn ghost" href="${h}" target="_blank" rel="noopener">${l}</a>`).join("");
+  const d = $("sharedlg"); if (!d.open) d.showModal();
+}
 function confirmInline(btn, q){ if (btn.dataset.armed) return true; btn.dataset.armed = "1"; btn.textContent = q; setTimeout(() => { delete btn.dataset.armed; }, 4000); return false; }
 function setPanel(v){ S.panel = v; if (v==="gremium") S.gremium=null; if (v==="bots") S.bots=null; updateSide(); renderPanel(); if (sideOn() && (narrow() || S.mode==="home")) $("panel").scrollIntoView({behavior:"smooth", block:"start"}); }
 async function refresh(){ if (S.mode==="law") await loadState(); await loadAll(); render(); }
@@ -1173,6 +1199,9 @@ document.addEventListener("click", async e => {
     if (t.dataset.dlDraft!==undefined){ download(`reformpaket-${S.pkg.id}.txt`, S.pkg.draft); return; }
     if (t.dataset.draft){ const j = await api("/api/draft?cid="+t.dataset.draft); showDraft(j.text); return; }
     if (t.id==="draftclose"){ $("draftdlg").close(); return; }
+    if (t.dataset.share){ await share(t.dataset.share); return; }
+    if (t.id==="shareclose"){ $("sharedlg").close(); return; }
+    if (t.id==="sharecopy"){ await copyText($("shareurl").value); return; }
     if (t.id==="draftcopy"){ await copyText($("draftpre").textContent); return; }
     if (t.dataset.prate){
       const id = t.dataset.prate, v = (S.myPkgRatings||{})[id]===t.dataset.v ? null : t.dataset.v;
@@ -1298,6 +1327,14 @@ document.addEventListener("submit", async e => {
   if (id==="pkgedit"){
     try { await api("/api/package/update", {id:S.pkg.id, title:v("pkt"), summary:v("pks")}); await reloadPkg(); toast("Gespeichert"); }
     catch(x){ toast(x.message); }
+    return;
+  }
+  if (e.target.dataset && e.target.dataset.holdform){
+    const f = e.target, hold = e.submitter && e.submitter.value==="1";
+    try {
+      await api("/api/gremium/hold", {finding:f.dataset.holdform, user_ids: hold ? f.dataset.ids.split(",").map(Number) : [], hold, note:f.elements.note.value});
+      S.gremium = null; await refresh(); toast(hold ? "Stimmen ausgesetzt und protokolliert" : "Als unbedenklich protokolliert");
+    } catch(x){ toast(x.message); }
     return;
   }
   if (e.target.dataset && e.target.dataset.restoreform){

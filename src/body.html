@@ -1,7 +1,7 @@
 <header>
   <div class="hbar wrap">
     <div class="brand"><a href="#/" class="home"><b>Offenes <span>Recht</span></b></a><small id="crumb"></small></div>
-    <nav class="mainnav" aria-label="Hauptnavigation"><a href="#/" data-nav="home-laws">Rechtsvorschriften</a><a href="#/" data-nav="home-props">Vorschläge</a><a href="#/" data-nav="home-pkgs">Reformpakete</a><a href="#/zahlen">Zahlen</a><a href="#/projekt">Über das Projekt</a><a href="#/api">API &amp; MCP</a></nav>
+    <nav class="mainnav" aria-label="Hauptnavigation"><a href="#/" data-nav="home-laws">Recht</a><a href="#/" data-nav="home-props">Vorschläge</a><a href="#/" data-nav="home-pkgs">Pakete</a><a href="#/zahlen">Zahlen</a><a href="#/projekt">Projekt</a><a href="#/api">API</a></nav>
     <div class="acct" id="acct"></div>
   </div>
   <div class="demo"><div class="wrap"><strong>Pilotbetrieb.</strong> Anmeldung vorerst ohne ID Austria, Konten sind daher nicht verifiziert. Normtexte tagesaktuell aus dem RIS (Bundesrecht konsolidiert).</div></div>
@@ -18,6 +18,11 @@
 <button id="selbtn" hidden>Markierung kommentieren</button>
 
 <dialog class="auth" id="auth" aria-labelledby="authtitle"></dialog>
+<dialog class="auth draftdlg sharedlg" id="sharedlg" aria-labelledby="sharetitle"><div class="lbl">Link zum Teilen</div><h2 id="sharetitle">Teilen</h2>
+  <div class="row"><input id="shareurl" readonly aria-label="Link"><button class="btn" id="sharecopy">Kopieren</button></div>
+  <div class="row wrapbtns" id="sharelinks"></div>
+  <p class="why">Die Vorschau zeigt Titel, Zustimmung und Begründung. Beim Öffnen der Links gelten die Bedingungen der jeweiligen Plattform; Offenes Recht bindet keine Plattform ein.</p>
+  <div class="row"><button class="btn ghost" id="shareclose">Schließen</button></div></dialog>
 <dialog class="auth draftdlg" id="draftdlg" aria-labelledby="drafttitle"><div class="lbl">Automatisch erzeugt</div><h2 id="drafttitle">Gesetzesentwurf</h2>
   <pre class="code draft" id="draftpre"></pre>
   <div class="row"><button class="btn" id="draftcopy">Kopieren</button><button class="btn ghost" id="draftclose">Schließen</button></div></dialog>

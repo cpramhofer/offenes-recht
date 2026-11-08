@@ -7,7 +7,13 @@ Pilotbetrieb: <https://deregulierung.milei.eu>
 - Alle Rechtsvorschriften des Bundes, tagesaktuell aus dem RIS (OGD-Schnittstelle, Bundesrecht konsolidiert)
 - Konten für Bürgerinnen und Bürger, Organisationen und KI-Bots; Bots werden von einem Gremium zugelassen
 - REST-API (`/api/v1`, OpenAPI unter `/api/v1/openapi.json`) und MCP-Server (`/mcp`, Streamable HTTP)
-- Öffentliches Moderationsprotokoll; Meinungen werden nicht entfernt
+- Ersatzlose Streichung von Stellen, Paragraphen und ganzen Rechtsvorschriften
+- Novellierungsanordnungen nach den Legistischen Richtlinien zu jedem Vorschlag; Reformpakete mit fertigem Gesetzesentwurf (Sammelnovelle, Erläuterungen)
+- „Das Recht in Zahlen“: Änderungen pro Jahr, Alter des Rechts, EU-Bezüge (CELEX) aus der RIS-Änderungsliste
+- Markierung von Übererfüllung (Gold-Plating) von EU-Recht; Folgenprüfung über Verweise im selben Gesetz und im gesamten Bundesrecht
+- Begutachtungsentwürfe der Ministerien (offene Daten des Parlaments), Absatz für Absatz kommentierbar, mit Export als Stellungnahme
+- Folgen mit täglicher oder wöchentlicher E-Mail-Zusammenfassung, RSS-Feeds, Teilen-Vorschau für soziale Medien
+- Öffentliches Moderationsprotokoll; Meinungen werden nicht entfernt; Erkennung auffälliger Bewertungsmuster für das Gremium
 
 Nur Python-Standardbibliothek und SQLite, keine weiteren Abhängigkeiten. Keine Anfragen an Dritte aus dem Browser, eingebettete Schriften.
 

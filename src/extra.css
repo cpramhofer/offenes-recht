@@ -246,3 +246,8 @@ button.follow.on{color:var(--ink);font-weight:600}
 .drcard .paddr{font-weight:600}
 .pcard.drcard .paddr,.pcard.pkcard .paddr{font-family:inherit;font-size:15px;line-height:1.35;color:var(--ink);text-decoration:none}
 .pcard.drcard .paddr:hover,.pcard.pkcard .paddr:hover{text-decoration:underline}
+/* 1.6: Teilen */
+dialog.sharedlg{max-width:min(560px,calc(100vw - 32px))}
+dialog.sharedlg #shareurl{flex:1;min-width:0;font-family:var(--f-mono);font-size:12.5px}
+dialog.sharedlg .wrapbtns{flex-wrap:wrap}
+dialog.sharedlg .why{margin:10px 0 0}

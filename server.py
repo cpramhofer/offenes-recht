@@ -59,6 +59,7 @@ CREATE TABLE IF NOT EXISTS drafts(gnr TEXT PRIMARY KEY, gp TEXT, inr INTEGER, ti
   einlangen TEXT, url TEXT, active INTEGER DEFAULT 0, statements INTEGER DEFAULT 0, synced INTEGER);
 CREATE TABLE IF NOT EXISTS follows(user_id INTEGER NOT NULL, kind TEXT NOT NULL, ref TEXT NOT NULL, created INTEGER NOT NULL,
   seen_count INTEGER, seen_status TEXT, PRIMARY KEY(user_id, kind, ref));
+CREATE TABLE IF NOT EXISTS anomaly_reviews(fid TEXT PRIMARY KEY, decision TEXT, by_user INTEGER, at INTEGER, note TEXT);
 CREATE TABLE IF NOT EXISTS resets(token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL, expires INTEGER NOT NULL, used INTEGER DEFAULT 0);
 """
 
@@ -145,6 +146,8 @@ def init_db(seed=True):
     if c.execute("SELECT 1 FROM laws WHERE aenderung IS NOT NULL AND n_changes IS NULL LIMIT 1").fetchone():
         c.commit(); recompute_law_metrics(c)
     ucols = [r[1] for r in c.execute("PRAGMA table_info(users)")]
+    if "rating_hold" not in ucols:
+        c.execute("ALTER TABLE users ADD COLUMN rating_hold INTEGER DEFAULT 0")    # Stimmen vorläufig nicht gezählt (Gremium)
     if "notify" not in ucols:
         c.execute("ALTER TABLE users ADD COLUMN notify TEXT DEFAULT 'daily'")    # Benachrichtigungen zu gefolgten Inhalten
         c.execute("ALTER TABLE users ADD COLUMN last_digest INTEGER")
@@ -269,7 +272,8 @@ def contribution_stats(c, rows):
     agg = {i: [0, 0, 0] for i in ids}
     if ids:
         q = ",".join("?"*len(ids))
-        for r in c.execute(f"SELECT cid, v, COUNT(*) n FROM ratings WHERE cid IN ({q}) GROUP BY cid, v", ids):
+        for r in c.execute(f"""SELECT cid, v, COUNT(*) n FROM ratings WHERE cid IN ({q})
+                               AND user_id NOT IN (SELECT id FROM users WHERE rating_hold=1) GROUP BY cid, v""", ids):
             agg[r["cid"]]["htn".index(r["v"])] += r["n"]
     out = {}
     for r in rows:
@@ -293,7 +297,7 @@ def contribution_stats(c, rows):
         pid = [r["id"] for r in lst]
         comps = []
         q = ",".join("?"*len(pid))
-        for p in c.execute(f"SELECT a,b,winner FROM pairwise WHERE a IN ({q}) AND b IN ({q})", pid+pid):
+        for p in c.execute(f"SELECT a,b,winner FROM pairwise WHERE a IN ({q}) AND b IN ({q}) AND user_id NOT IN (SELECT id FROM users WHERE rating_hold=1)", pid+pid):
             if p["winner"] == 0:
                 comps += [(p["a"], p["b"], .5), (p["b"], p["a"], .5)]
             else:
@@ -902,7 +906,7 @@ def need(cond, code, msg):
     if not cond: raise ApiError(code, msg)
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "OffenesRecht/1.5"
+    server_version = "OffenesRecht/1.6"
 
     def log_message(self, fmt, *a):
         # bewusst ohne IP-Adresse (Datenschutz); Fehlersuche über Pfad und Status
@@ -1002,6 +1006,10 @@ class Handler(BaseHTTPRequestHandler):
                     if mt and m == method:
                         return self.send_json(200, fn(self, *mt.groups()))
                 raise ApiError(404, "Unbekannter Endpunkt. Übersicht: " + PUBLIC_URL + "/api/v1/openapi.json")
+            if re.fullmatch(r"/(v|p|e)/\d{1,9}", path) and method == "GET":
+                return self.send_raw(200, "text/html; charset=utf-8", share_page(path))
+            if path == "/og.png" and method == "GET":
+                return self.send_raw(200, "image/png", og_png())
             if path.startswith("/feed/") or path == "/abmelden":
                 need(method == "GET", 405, "Methode nicht erlaubt.")
                 if path == "/abmelden": return self.send_raw(200, "text/html; charset=utf-8", unsubscribe_page(self.query))
@@ -1315,8 +1323,12 @@ def r_moderation_log(h):
              "reports_dismissed": c.execute("SELECT COUNT(*) FROM reports WHERE status='dismissed'").fetchone()[0],
              "removed": c.execute("SELECT COUNT(*) FROM contributions WHERE removed_at IS NOT NULL").fetchone()[0]
                         + c.execute("SELECT COUNT(*) FROM packages WHERE removed_at IS NOT NULL").fetchone()[0],
-             "restored": c.execute("SELECT COUNT(*) FROM audit WHERE action='moderation:restore'").fetchone()[0]}
-    return {"removed": removed, "stats": stats}
+             "restored": c.execute("SELECT COUNT(*) FROM audit WHERE action='moderation:restore'").fetchone()[0],
+             "held_accounts": c.execute("SELECT COUNT(*) FROM users WHERE rating_hold=1").fetchone()[0],
+             "held_ratings": c.execute("SELECT COUNT(*) FROM ratings WHERE user_id IN (SELECT id FROM users WHERE rating_hold=1)").fetchone()[0]}
+    holds = [{"at": r["created"], "note": r["note"], "action": r["action"].split(":")[1]}
+             for r in c.execute("SELECT * FROM audit WHERE action IN ('moderation:hold','moderation:unhold') ORDER BY id DESC LIMIT 50")]
+    return {"removed": removed, "stats": stats, "holds": holds}
 
 def r_renew_key(h):
     u = h.session_user(); need(u, 401, "Bitte anmelden.")
@@ -1544,7 +1556,7 @@ def r_norm(h):
 # mit API-Schlüssel (Authorization: Bearer …). REST und MCP verwenden dieselben Kernfunktionen.
 from urllib.parse import unquote
 
-APP_VERSION = "1.5"
+APP_VERSION = "1.6"
 READ_LIMIT_PER_MIN = int(os.environ.get("OR_API_READ_LIMIT", "120"))
 WRITE_LIMIT_PER_HOUR = int(os.environ.get("OR_API_WRITE_HOUR", "20"))
 WRITE_LIMIT_PER_DAY = int(os.environ.get("OR_API_WRITE_DAY", "100"))
@@ -2550,6 +2562,168 @@ def unsubscribe_page(q):
             f'<body style="font-family:system-ui,sans-serif;max-width:560px;margin:60px auto;padding:0 16px;color:#1A1F2B;background:#F5F6F8">'
             f'<h1 style="font-size:22px">Benachrichtigungen</h1><p>{msg}</p><p><a href="/">Zur Startseite</a></p></body>').encode()
 
+# ---------- Teilen: Vorschauseiten für soziale Medien ----------
+# Die App nutzt Hash-Adressen (#/…), die Vorschau-Crawler nicht sehen. /v/<id>, /p/<id> und /e/<gnr> liefern
+# Open-Graph-Angaben und leiten Menschen sofort zur App weiter.
+_og_png = None
+def og_png():
+    global _og_png
+    if _og_png is None:
+        import base64
+        try: _og_png = base64.b64decode(json.load(open(os.path.join(HERE, "seed.json"), encoding="utf-8")).get("og_png", ""))
+        except Exception: _og_png = b""
+    return _og_png
+
+def _short(t, n):
+    t = re.sub(r"\s+", " ", t or "").strip()
+    return t if len(t) <= n else t[:n - 1].rsplit(" ", 1)[0] + " …"
+
+def share_page(path):
+    from html import escape as x
+    c = db(); m = re.fullmatch(r"/(v|p|e)/(\d{1,9})", path); need(m, 404, "Nicht gefunden.")
+    kind, ref = m.group(1), m.group(2)
+    if kind == "v":
+        r = c.execute("SELECT * FROM contributions WHERE id=? AND removed_at IS NULL", (int(ref),)).fetchone(); need(r, 404, "Beitrag nicht gefunden.")
+        st = contribution_stats(c, [r])[r["id"]]; where = key_label(c, r["key"])
+        if r["type"] == "com": title, desc = f"Kommentar zu {where}", r["text"]
+        elif r["op"] == "repeal": title, desc = f"Streichen: {where}", "Vorschlag: ersatzlos streichen. " + (r["why"] or "")
+        else:
+            title = f"Besserer Wortlaut für {where}"
+            desc = (amend_for(c, r) or ("Neuer Wortlaut: " + r["text"])) + " Begründung: " + (r["why"] or "")
+        if st["total"]: desc = f"{round(st['share'] * 100)} % Zustimmung bei {st['total']} Stimmen. " + desc
+        target = f"/#/g/{r['key']}"
+    elif kind == "p":
+        p = c.execute("SELECT * FROM packages WHERE id=? AND removed_at IS NULL", (int(ref),)).fetchone(); need(p, 404, "Paket nicht gefunden.")
+        n = c.execute("SELECT COUNT(*) FROM package_items WHERE package_id=?", (p["id"],)).fetchone()[0]
+        st = package_stats(c, p["id"])
+        title = f"Reformpaket: {p['title']}"
+        desc = f"{n} Vorschläge mit fertigem Gesetzesentwurf. " + (f"{round(st['share'] * 100)} % Zustimmung bei {st['total']} Stimmen. " if st["total"] else "") + p["summary"]
+        target = f"/#/paket/{p['id']}"
+    else:
+        need(re.fullmatch(r"\d{8}", ref), 404, "Nicht gefunden.")
+        l = c.execute("SELECT * FROM laws WHERE gnr=?", (ref,)).fetchone(); need(l, 404, "Nicht gefunden.")
+        nc = c.execute("SELECT COUNT(*) FROM contributions WHERE key LIKE ? AND removed_at IS NULL", (ref + "/%",)).fetchone()[0]
+        if is_draft(ref):
+            d = c.execute("SELECT * FROM drafts WHERE gnr=?", (ref,)).fetchone()
+            title = f"Entwurf {l['abk']}: {l['kurztitel']}"
+            desc = (f"In Begutachtung bis {fmt_de(d['frist'])}. " if d and d["frist"] else "") + f"Absatz für Absatz kommentieren und Stellung nehmen. {nc} {'Beitrag' if nc == 1 else 'Beiträge'} bisher."
+        else:
+            title = l["kurztitel"]
+            desc = f"{l['n_norms'] or ''} Normen, {l['n_changes'] or 0} Änderungen seit der Stammfassung. Absatz für Absatz kommentieren und verbessern. {nc} {'Beitrag' if nc == 1 else 'Beiträge'} bisher."
+        target = f"/#/g/{ref}"
+    title, desc = _short(title, 110), _short(desc, 280)
+    url = PUBLIC_URL + path
+    return (f'<!doctype html><html lang="de"><head><meta charset="utf-8"><title>{x(title)} · Offenes Recht</title>'
+            f'<meta name="description" content="{x(desc)}"><link rel="canonical" href="{x(PUBLIC_URL + target)}">'
+            f'<meta property="og:type" content="article"><meta property="og:site_name" content="Offenes Recht">'
+            f'<meta property="og:title" content="{x(title)}"><meta property="og:description" content="{x(desc)}"><meta property="og:url" content="{x(url)}">'
+            f'<meta property="og:image" content="{PUBLIC_URL}/og.png"><meta property="og:image:width" content="1200"><meta property="og:image:height" content="630">'
+            f'<meta name="twitter:card" content="summary_large_image"><meta name="twitter:title" content="{x(title)}"><meta name="twitter:description" content="{x(desc)}">'
+            f'<meta http-equiv="refresh" content="0;url={x(target)}"></head><body><p><a href="{x(target)}">{x(title)}</a></p>'
+            f'<script>location.replace({json.dumps(target)})</script></body></html>').encode()
+
+# ---------- Schutz der Bewertungen ----------
+# Ohne ID Austria lassen sich Mehrfachkonten nicht ausschließen. Die App speichert keine IP-Adressen; erkannt
+# werden daher nur Muster in Konten und Stimmen. Auffälligkeiten gehen an das Gremium; ausgesetzte Stimmen
+# zählen nicht, bleiben aber gespeichert und können wieder gezählt werden. Jede Entscheidung wird protokolliert.
+def anomalies(c):
+    import hashlib
+    out = []
+    users = {r["id"]: r for r in c.execute("SELECT id, name, created, rating_hold FROM users WHERE role='citizen' AND status='active'")}
+    def fid(kind, ids): return hashlib.sha1((kind + ":" + ",".join(map(str, sorted(ids)))).encode()).hexdigest()[:12]
+    def acc(ids): return [{"id": i, "name": users[i]["name"], "created": users[i]["created"], "held": bool(users[i]["rating_hold"])} for i in sorted(ids) if i in users]
+    # 1. Viele neue Bürgerkonten in kurzer Zeit
+    recent = sorted((u["created"], i) for i, u in users.items() if u["created"] > now() - 30 * 86400)
+    j = 0
+    for k in range(len(recent)):
+        while recent[k][0] - recent[j][0] > 3600: j += 1
+        win = [i for _, i in recent[j:k + 1]]
+        if len(win) >= 8 and (k + 1 == len(recent) or recent[k + 1][0] - recent[j][0] > 3600):
+            out.append({"id": fid("reg", win), "kind": "Registrierungswelle", "accounts": acc(win), "items": [],
+                        "detail": f"{len(win)} Bürgerkonten innerhalb einer Stunde angelegt."})
+    # 2. Stimmenwelle neuer Konten auf einen Beitrag (gleiche Konten über mehrere Beiträge werden zusammengefasst)
+    bursts = {}
+    for (cid,) in c.execute("SELECT cid FROM ratings GROUP BY cid HAVING COUNT(*) >= 10").fetchall():
+        rs = c.execute("SELECT user_id, v, created FROM ratings WHERE cid=? ORDER BY created", (cid,)).fetchall()
+        j = 0
+        for k in range(len(rs)):
+            while rs[k]["created"] - rs[j]["created"] > 3600: j += 1
+            win = rs[j:k + 1]
+            young = [r for r in win if r["user_id"] in users and r["created"] - users[r["user_id"]]["created"] < 3 * 86400]
+            if len(win) >= 10 and len(young) >= 0.7 * len(win):
+                b = bursts.setdefault(frozenset(r["user_id"] for r in young), {"items": [], "same": True, "n": 0})
+                b["items"].append(cid); b["n"] = max(b["n"], len(win)); b["same"] = b["same"] and len({r["v"] for r in young}) == 1
+                break
+    for accs, b in bursts.items():
+        out.append({"id": fid("burst", accs), "kind": "Stimmenwelle", "accounts": acc(accs), "items": b["items"],
+                    "detail": f"Bis zu {b['n']} Stimmen innerhalb einer Stunde auf {len(b['items'])} {'Beitrag' if len(b['items']) == 1 else 'Beiträge'}, "
+                              f"überwiegend von {len(accs)} Konten, die jünger als drei Tage sind" + (", alle gleich." if b["same"] else ".")})
+    # 3. Konten, die fast nur eine Person unterstützen
+    authors = {r["id"]: r["user_id"] for r in c.execute("SELECT id, user_id FROM contributions")}
+    fans = {}
+    for uid in users:
+        rs = c.execute("SELECT cid, v FROM ratings WHERE user_id=?", (uid,)).fetchall()
+        if len(rs) < 5: continue
+        by = {}
+        for r in rs: by.setdefault(authors.get(r["cid"]), []).append(r["v"])
+        top, vs = max(by.items(), key=lambda kv: len(kv[1]))
+        if top and len(vs) >= 0.9 * len(rs) and len(set(vs)) == 1:
+            fans.setdefault((top, vs[0]), []).append(uid)
+    for (author, v), ids in fans.items():
+        if len(ids) >= 3:
+            name = (c.execute("SELECT name FROM users WHERE id=?", (author,)).fetchone() or ["?"])[0]
+            out.append({"id": fid(f"fan{author}{v}", ids), "kind": "Einseitige Unterstützung", "accounts": acc(ids), "items": [],
+                        "detail": f"{len(ids)} Konten stimmen fast ausschließlich über Beiträge von „{name}“ ab, und zwar immer gleich ({ {'h': 'Ja', 't': 'Teilweise', 'n': 'Nein'}[v] })."})
+    # 4. Gleichförmig abstimmende Gruppen
+    votes = {}
+    for r in c.execute("SELECT user_id, cid, v FROM ratings"): votes.setdefault(r["user_id"], {})[r["cid"]] = r["v"]
+    ids = [u for u in votes if u in users and len(votes[u]) >= 5]
+    parent = {u: u for u in ids}
+    def find(a):
+        while parent[a] != a: parent[a] = parent[parent[a]]; a = parent[a]
+        return a
+    for a in range(len(ids)):
+        for b in range(a + 1, len(ids)):
+            va, vb = votes[ids[a]], votes[ids[b]]
+            common = set(va) & set(vb)
+            if len(common) >= 5 and all(va[x] == vb[x] for x in common) and len(common) >= 0.8 * min(len(va), len(vb)):
+                parent[find(ids[a])] = find(ids[b])
+    groups = {}
+    for u in ids: groups.setdefault(find(u), []).append(u)
+    for g in groups.values():
+        if len(g) >= 3:
+            out.append({"id": fid("bloc", g), "kind": "Gleichförmige Gruppe", "accounts": acc(g), "items": [],
+                        "detail": f"{len(g)} Konten haben bei mindestens fünf gemeinsamen Beiträgen immer gleich abgestimmt."})
+    reviewed = {r["fid"]: r for r in c.execute("SELECT * FROM anomaly_reviews")}
+    for a in out:
+        r = reviewed.get(a["id"])
+        a["review"] = {"decision": r["decision"], "at": r["at"], "note": r["note"]} if r else None
+    return out
+
+def r_g_anomalies(h):
+    require_gremium(h); c = db()
+    held = c.execute("SELECT COUNT(*) FROM users WHERE rating_hold=1").fetchone()[0]
+    return {"findings": anomalies(c), "held_accounts": held}
+
+def r_g_hold(h):
+    """Stimmen von Konten aussetzen oder wieder zählen; mit Begründung, protokolliert."""
+    g = require_gremium(h); d = h.body(); c = db()
+    ids = [int(x) for x in (d.get("user_ids") or [])][:500]; on = bool(d.get("hold")); note = (d.get("note") or "").strip()[:500]
+    fid_ = (d.get("finding") or "")[:20]
+    need(ids or fid_, 400, "Keine Konten angegeben.")
+    need(len(note) >= 10, 400, "Bitte die Entscheidung kurz begründen; sie wird protokolliert.")
+    if ids:
+        q = ",".join("?" * len(ids))
+        need(g["id"] not in ids, 403, "Über das eigene Konto entscheidet ein anderes Gremiumsmitglied.")
+        c.execute(f"UPDATE users SET rating_hold=? WHERE id IN ({q}) AND role='citizen'", [1 if on else 0] + ids)
+        n = c.execute(f"SELECT COUNT(*) FROM ratings WHERE user_id IN ({q})", ids).fetchone()[0]
+        log(g["id"], "moderation:" + ("hold" if on else "unhold"), None,
+            f"Stimmen von {len(ids)} Konten {'ausgesetzt' if on else 'wieder gezählt'} ({n} Bewertungen) · {note}")
+    if fid_:
+        c.execute("INSERT OR REPLACE INTO anomaly_reviews VALUES(?,?,?,?,?)", (fid_, "held" if (ids and on) else "ok", g["id"], now(), note))
+        if not ids: log(g["id"], "moderation:anomaly-ok", None, f"Auffälligkeit {fid_} als unbedenklich eingestuft · {note}")
+    c.commit(); return {"ok": True}
+
 # ---------- Reformpakete ----------
 PKG_MAX = 100
 def _pkg_items(c, pid):
@@ -2577,7 +2751,7 @@ def _check_items(c, ids):
 
 def package_stats(c, pid):
     agg = {"h": 0, "t": 0, "n": 0}
-    for r in c.execute("SELECT v, COUNT(*) n FROM package_ratings WHERE package_id=? GROUP BY v", (pid,)): agg[r["v"]] = r["n"]
+    for r in c.execute("SELECT v, COUNT(*) n FROM package_ratings WHERE package_id=? AND user_id NOT IN (SELECT id FROM users WHERE rating_hold=1) GROUP BY v", (pid,)): agg[r["v"]] = r["n"]
     tot = sum(agg.values()); pos = agg["h"] + .5 * agg["t"]; lo, hi = wilson(pos, tot)
     status = "Neu" if tot < 10 else "Breite Zustimmung" if lo >= .55 else "Überwiegend abgelehnt" if hi < .45 else "Offen"
     return {**agg, "total": tot, "share": round(pos / tot, 4) if tot else 0, "lower": round(lo, 4), "upper": round(hi, 4), "status": status, "score": round(lo, 4)}
@@ -2705,6 +2879,7 @@ ROUTES = {
     ("GET", "/api/packages"): r_packages, ("GET", "/api/package"): r_package, ("POST", "/api/packages"): r_package_create,
     ("POST", "/api/package/update"): r_package_update, ("POST", "/api/package/add"): r_package_add, ("POST", "/api/package/rate"): r_package_rate,
     ("GET", "/api/draft"): r_draft, ("GET", "/api/drafts"): r_drafts,
+    ("GET", "/api/gremium/anomalies"): r_g_anomalies, ("POST", "/api/gremium/hold"): r_g_hold,
     ("POST", "/api/follow"): r_follow, ("GET", "/api/follows"): r_follows, ("POST", "/api/account/notify"): r_notify, ("GET", "/api/references"): r_references, ("GET", "/api/zahlen"): r_zahlen,
 }
 
