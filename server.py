@@ -686,7 +686,10 @@ def amendment_instruction(c, row):
         while tag != "insert" and _count(A, A[l:r]) > 1 and (l > 0 or r < len(A)):
             if l > 0: l -= 1; jl -= 1
             elif r < len(A): r += 1; jr += 1
-        if tag == "insert":
+        if tag == "insert" and i1 == len(A) and A[-1].endswith((".", ":")) and ins and ins[0][:1].isupper():
+            n_s = len(re.findall(r"[.!?](?=\s|$)", " ".join(ins)))
+            out.append(f"Dem {ref} {'werden folgende Sätze' if n_s > 1 else 'wird folgender Satz'} angefügt:\n{_q(' '.join(ins))}")
+        elif tag == "insert":
             if i1 > 0:
                 k = i1 - 1
                 while _count(A, A[k:i1]) > 1 and k > 0: k -= 1
@@ -725,8 +728,9 @@ def law_citation(c, gnr):
     law = c.execute("SELECT * FROM laws WHERE gnr=?", (gnr,)).fetchone()
     name = law["kurztitel"] if law else gnr
     stamm = law["kundmachung"] if law else None
-    m = re.search(r"StF:\s*([^·]+)", (law["titel"] if law else "") or "")
-    if m: stamm = re.sub(r"\s*\((?:WV|DFB)\)\s*$", "", m.group(1).strip())
+    m = re.search(r"StF:\s*(BGBl\.\s*(?:I{1,3}\s*)?Nr\.\s*\d+/\d{4})", (law["titel"] if law else "") or "")
+    if m: stamm = re.sub(r"\s+", " ", m.group(1))
+    elif stamm: stamm = re.sub(r"\s*\(.*$", "", stamm).strip()
     last = last_change(law["aenderung"] if law else None)
     cit = f"{name}, {stamm}" if stamm else name
     if last and last != stamm: cit += f", zuletzt geändert durch {last}"
@@ -836,7 +840,7 @@ def need(cond, code, msg):
     if not cond: raise ApiError(code, msg)
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "OffenesRecht/1.3"
+    server_version = "OffenesRecht/1.3.1"
 
     def log_message(self, fmt, *a):
         # bewusst ohne IP-Adresse (Datenschutz); Fehlersuche über Pfad und Status
@@ -1454,7 +1458,7 @@ def r_norm(h):
 # mit API-Schlüssel (Authorization: Bearer …). REST und MCP verwenden dieselben Kernfunktionen.
 from urllib.parse import unquote
 
-APP_VERSION = "1.3"
+APP_VERSION = "1.3.1"
 READ_LIMIT_PER_MIN = int(os.environ.get("OR_API_READ_LIMIT", "120"))
 WRITE_LIMIT_PER_HOUR = int(os.environ.get("OR_API_WRITE_HOUR", "20"))
 WRITE_LIMIT_PER_DAY = int(os.environ.get("OR_API_WRITE_DAY", "100"))
