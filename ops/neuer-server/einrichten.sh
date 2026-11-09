@@ -11,8 +11,8 @@ umask 022
 
 DOMAIN="${DOMAIN:-offenesrecht.at}"
 EMAIL="${EMAIL:-christoph.pramhofer@neos.eu}"          # nur für Let's Encrypt (Ablaufwarnungen)
-OR_VERSION="1.8.2"
-PKG_SHA="86b36af0ec18613dbafdef2ecd0970efedc78169f0fd496d89052794cb95d7e1"
+OR_VERSION="1.8.3"
+PKG_SHA="5c4dec66938cec46c280043ac25591c714c1900d99bb420b0b6bd179dd1f86f7"
 REPO="cpramhofer/offenes-recht"
 APP=/opt/offenes-recht
 DATA=/var/lib/offenes-recht
@@ -390,11 +390,15 @@ Keine Shell, kein Dateizugriff, kein direkter Datenbankzugriff.
 """
 import os
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 import offenes_recht_ops
 
 TOKEN = open("/etc/or-ops-mcp/token").read().strip()
+# Der Dienst lauscht nur auf 127.0.0.1 und ist ausschließlich über nginx unter der geheimen Adresse erreichbar.
+# Die eingebaute Host-/Origin-Prüfung (gedacht für lokal laufende Server im Browser) würde Anfragen von claude.ai abweisen.
 mcp = FastMCP("offenesrecht-ops", host="127.0.0.1", port=8791,
-              streamable_http_path=f"/{TOKEN}/mcp", stateless_http=True, json_response=True)
+              streamable_http_path=f"/{TOKEN}/mcp", stateless_http=True, json_response=True,
+              transport_security=TransportSecuritySettings(enable_dns_rebinding_protection=False))
 offenes_recht_ops.register(mcp)
 
 if __name__ == "__main__":

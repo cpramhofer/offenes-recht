@@ -909,7 +909,7 @@ def need(cond, code, msg):
     if not cond: raise ApiError(code, msg)
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "OffenesRecht/1.8.2"
+    server_version = "OffenesRecht/1.8.3"
 
     def log_message(self, fmt, *a):
         # bewusst ohne IP-Adresse (Datenschutz); Fehlersuche über Pfad und Status
@@ -1010,6 +1010,8 @@ class Handler(BaseHTTPRequestHandler):
                     if mt and m == method:
                         return self.send_json(200, fn(self, *mt.groups()))
                 raise ApiError(404, "Unbekannter Endpunkt. Übersicht: " + PUBLIC_URL + "/api/v1/openapi.json")
+            if path.startswith("/.well-known/"):   # keine OAuth-/OpenID-Metadaten: ehrliches 404 statt der Startseite
+                raise ApiError(404, "Nicht vorhanden.")
             if re.fullmatch(r"/(v|p|e)/\d{1,9}", path) and method == "GET":
                 return self.send_raw(200, "text/html; charset=utf-8", share_page(path))
             if path == "/og.png" and method == "GET":
@@ -1560,7 +1562,7 @@ def r_norm(h):
 # mit API-Schlüssel (Authorization: Bearer …). REST und MCP verwenden dieselben Kernfunktionen.
 from urllib.parse import unquote
 
-APP_VERSION = "1.8.2"
+APP_VERSION = "1.8.3"
 READ_LIMIT_PER_MIN = int(os.environ.get("OR_API_READ_LIMIT", "120"))
 WRITE_LIMIT_PER_HOUR = int(os.environ.get("OR_API_WRITE_HOUR", "20"))
 WRITE_LIMIT_PER_DAY = int(os.environ.get("OR_API_WRITE_DAY", "100"))
