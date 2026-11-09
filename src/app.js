@@ -71,8 +71,16 @@ function go(hash){ if (location.hash !== hash) location.hash = hash; else route(
 async function route(){
   const p = location.hash.replace(/^#\/?/, "").split("/").filter(Boolean);
   S.compare = false;
-  if (["impressum","datenschutz","reset","api","projekt","moderation","paket","zahlen","konto","statistik"].includes(p[0])){
-    if (p[0]==="statistik"){ S.stats = null; if (!S.all) await loadAll().catch(()=>{}); if (S.user && S.user.gremium){ try { S.stats = await api("/api/gremium/stats"); } catch(e){ S.stats = {error:e.message}; } } }
+  if (p[0]==="statistik"){ location.replace("#/gremium/statistik"); return; }
+  if (["impressum","datenschutz","reset","api","projekt","moderation","paket","zahlen","konto","gremium"].includes(p[0])){
+    if (p[0]==="gremium"){
+      S.gTab = GTABS.some(t => t[0]===p[1]) ? p[1] : "antraege"; if (S.panel==="gremium") S.panel = "default";
+      if (!S.all) await loadAll().catch(()=>{});
+      if (S.user && S.user.gremium){
+        if (S.gTab==="statistik"){ S.stats = null; try { S.stats = await api("/api/gremium/stats"); } catch(e){ S.stats = {error:e.message}; } }
+        else await loadGremium();
+      }
+    }
     if (p[0]==="konto"){ S.kontoTab = p[1]==="einstellungen" ? "einst" : "aktiv"; if (S.panel==="account") S.panel = "default"; await loadAll().catch(()=>{}); if (S.user) await loadActivity(); }
     if (p[0]==="zahlen"){ try { S.zahlen = await api("/api/zahlen"); } catch(e){ S.zahlen = {error:e.message}; } }
     if (p[0]==="moderation"){ try { S.modlog = await api("/api/moderation"); } catch(e){ S.modlog = {removed:[], stats:{}}; } }
@@ -80,7 +88,7 @@ async function route(){
     S.mode = "home"; S.gnr = null; S.law = null; S.page = p[0]; S.resetToken = p[1] || null;
     if (S.panel==="anchor") S.panel = "default";
     if (!S.all) await loadAll().catch(()=>{});
-    render(); hit(["reset"].includes(p[0]) ? "other" : p[0]);
+    render(); hit(["reset"].includes(p[0]) ? "other" : p[0]==="gremium" ? (S.gTab==="statistik" ? "statistik" : "other") : p[0]);
     const anchor = p[0]==="projekt" && p[1] ? $("p-"+p[1]) : null;
     if (anchor) anchor.scrollIntoView({block:"start"}); else window.scrollTo(0,0);
     return;
@@ -697,9 +705,19 @@ function renderAccount(panel){
       <div class="err" id="delerr" hidden></div><div class="row"><button class="btn" type="submit">Konto löschen</button></div></form>
     <div class="form">${backBtn()}</div>`;
 }
-async function renderGremium(panel){
-  if (!S.user || !S.user.gremium){ S.panel="default"; return renderPanel(); }
-  if (!S.gremium){ panel.innerHTML = `<div class="empty">Lade …</div>`; try { [S.gremium, S.anom] = await Promise.all([api("/api/gremium/pending"), api("/api/gremium/anomalies")]); } catch(e){ panel.innerHTML = `<div class="empty">${esc(e.message)}</div>`; return; } }
+async function loadGremium(){
+  try { [S.gremium, S.anom] = await Promise.all([api("/api/gremium/pending"), api("/api/gremium/anomalies")]); }
+  catch(e){ S.gremium = {error:e.message}; S.anom = null; }
+}
+async function renderGremium(panel){ S.panel = S.mode==="law" ? "anchor" : "default"; go("#/gremium"); }
+const GTABS = [["antraege","Anträge"],["meldungen","Meldungen"],["muster","Bewertungsmuster"],["bots","Bots & Limits"],["protokoll","Protokoll"],["statistik","Statistik"]];
+function renderGremiumPage(){
+  const u = S.user;
+  if (!u || !u.gremium) return `<article class="legal doc"><div class="lbl">Zulassungsgremium</div><h1>Nur für Mitglieder des Gremiums</h1><p>Bitte als Gremiumsmitglied anmelden.</p></article>`;
+  const tab = S.gTab || "antraege";
+  if (tab==="statistik") return renderStatistik();
+  if (!S.gremium) return `<article class="legal doc gremium"><div class="lbl">Zulassungsgremium</div><h1>Gremium</h1><div class="empty">Lade …</div></article>`;
+  if (S.gremium.error) return `<article class="legal doc"><h1>Gremium</h1><p>${esc(S.gremium.error)}</p></article>`;
   const an = S.anom || {findings:[], held_accounts:0};
   const g = S.gremium;
   const card = p => p.role==="bot" ? `<article class="card gcard"><div class="chead"><span class="who">${esc(p.name)}</span><span class="pill bot">KI-Bot</span><span class="vfy">beantragt ${fmtDate(p.created)} · ${esc(p.email)}</span></div>
@@ -734,18 +752,27 @@ async function renderGremium(panel){
           <label>Modell<input name="model" value="${esc(b.bot.model)}"></label>
           <div class="why">Das Profil steht öffentlich bei jedem Beitrag des Bots. Änderungen werden mit altem und neuem Wert protokolliert.</div>
           <button class="btn ghost" type="submit">Profil speichern</button></form></details></article>`;
-  panel.innerHTML = `<div class="ph"><div class="lbl">Zulassungsgremium · <a href="#/statistik">Statistik</a></div><h3 style="margin:4px 0 0;font-size:16px">Offene Anträge (${g.pending.length})</h3>
-    <p class="excerpt" style="-webkit-line-clamp:unset">KI-Bots dürfen erst nach Zulassung veröffentlichen. Organisationen schreiben sofort, werden aber erst nach Prüfung als „geprüft“ ausgewiesen. Jede Entscheidung wird protokolliert.</p></div>
-    <div class="list">${g.pending.length ? g.pending.map(card).join("") : `<div class="empty">Keine offenen Anträge.</div>`}</div>
-    <div class="ph"><div class="lbl">Gemeldete Beiträge (${(g.reports||[]).length})</div><p class="why" style="margin:4px 0 0">Entfernt werden nur rechtswidrige Inhalte, persönliche Angriffe, Spam und nicht gekennzeichnete Bots. Meinungen bleiben stehen. Jede Entscheidung erscheint im <a href="#/moderation">Moderationsprotokoll</a>.</p></div>
-    <div class="list">${(g.reports||[]).length ? g.reports.map(repRow).join("") : `<div class="empty">Keine offenen Meldungen.</div>`}</div>
-    <div class="ph"><div class="lbl">Auffällige Bewertungsmuster (${an.findings.filter(a => !a.review).length} offen)</div><p class="why" style="margin:4px 0 0">Ohne ID Austria lassen sich Mehrfachkonten nicht ausschließen. Erkannt werden Registrierungs- und Stimmenwellen, einseitige Unterstützung und gleichförmig abstimmende Gruppen. Ausgesetzte Stimmen zählen nicht, bleiben aber gespeichert und können wieder gezählt werden. Derzeit ausgesetzt: ${an.held_accounts} Konten.</p></div>
-    <div class="list">${an.findings.length ? an.findings.map(anRow).join("") : `<div class="empty">Keine Auffälligkeiten.</div>`}</div>
-    <div class="ph"><div class="lbl">Zugelassene Bots und Schreib-Limits</div><p class="why" style="margin:4px 0 0">Standard: ${g.defaults.per_hour} pro Stunde, ${g.defaults.per_day} pro Tag.</p></div>
-    <div class="list">${(g.bots||[]).length ? g.bots.map(botRow).join("") : `<div class="empty">Noch keine Bots zugelassen.</div>`}</div>
-    <div class="ph"><div class="lbl">Protokoll</div></div>
-    ${g.history.length ? g.history.map(h => `<div class="hist">${fmtDate(h.at)} · <b>${esc(h.target)}</b> ${names[h.action]||esc(h.action)}${h.by?" von "+esc(h.by):""}${h.note?" · „"+esc(h.note)+"“":""}</div>`).join("") : `<div class="hist">Noch keine Entscheidungen.</div>`}
-    <div class="form">${backBtn()}</div>`;
+  const nOpenAn = an.findings.filter(a => !a.review).length, nRep = (g.reports||[]).length;
+  const count = {antraege:g.pending.length, meldungen:nRep, muster:nOpenAn, bots:(g.bots||[]).length};
+  const head = `<div class="lbl">Zulassungsgremium</div><h1>Gremium</h1>
+    <div class="hero gtiles">
+      <a href="#/gremium/antraege" class="${g.pending.length?"warn":""}"><b>${g.pending.length}</b><span>offene Anträge</span></a>
+      <a href="#/gremium/meldungen" class="${nRep?"warn":""}"><b>${nRep}</b><span>offene Meldungen</span></a>
+      <a href="#/gremium/muster" class="${nOpenAn?"warn":""}"><b>${nOpenAn}</b><span>offene Bewertungsmuster</span><span class="sub">${an.held_accounts} Konten mit ausgesetzten Stimmen</span></a>
+      <a href="#/gremium/bots"><b>${(g.bots||[]).length}</b><span>zugelassene Bots</span></a>
+    </div>
+    <nav class="ktabs" aria-label="Bereiche">${GTABS.map(([k,l]) => `<a href="#/gremium/${k}" aria-current="${tab===k}">${l}${count[k]!==undefined && k!=="bots" && count[k] ? ` <span class="badge">${count[k]}</span>` : ""}</a>`).join("")}</nav>`;
+  let body = "";
+  if (tab==="antraege") body = `<p class="why">KI-Bots dürfen erst nach Zulassung veröffentlichen. Organisationen schreiben sofort, werden aber erst nach Prüfung als „geprüft“ ausgewiesen. Jede Entscheidung wird protokolliert.</p>
+    <div class="glist">${g.pending.length ? g.pending.map(card).join("") : `<div class="empty">Keine offenen Anträge.</div>`}</div>`;
+  else if (tab==="meldungen") body = `<p class="why">Entfernt werden nur rechtswidrige Inhalte, persönliche Angriffe, Spam, Beiträge ohne Normbezug und nicht gekennzeichnete Bots. Meinungen bleiben stehen. Jede Entscheidung erscheint im <a href="#/moderation">Moderationsprotokoll</a>.</p>
+    <div class="glist">${nRep ? g.reports.map(repRow).join("") : `<div class="empty">Keine offenen Meldungen.</div>`}</div>`;
+  else if (tab==="muster") body = `<p class="why">Ohne ID Austria lassen sich Mehrfachkonten nicht ausschließen. Erkannt werden Registrierungs- und Stimmenwellen, einseitige Unterstützung und gleichförmig abstimmende Gruppen, ohne IP-Adressen. Ausgesetzte Stimmen zählen nicht, bleiben aber gespeichert und können wieder gezählt werden. Derzeit ausgesetzt: ${an.held_accounts} Konten.</p>
+    <div class="glist">${an.findings.length ? [...an.findings].sort((a,b) => !!a.review - !!b.review).map(anRow).join("") : `<div class="empty">Keine Auffälligkeiten.</div>`}</div>`;
+  else if (tab==="bots") body = `<p class="why">Standardlimit: ${g.defaults.per_hour} Beiträge pro Stunde, ${g.defaults.per_day} pro Tag. Limits und Profiländerungen werden mit altem und neuem Wert protokolliert.</p>
+    <div class="glist two">${(g.bots||[]).length ? g.bots.map(botRow).join("") : `<div class="empty">Noch keine Bots zugelassen.</div>`}</div>`;
+  else body = g.history.length ? `<table class="dt ghist"><thead><tr><th>Wann</th><th>Wer/was</th><th>Entscheidung</th><th>Von</th></tr></thead><tbody>${g.history.map(h => `<tr><td class="num">${fmtDate(h.at)}</td><td><b>${esc(h.target)}</b></td><td>${names[h.action]||esc(h.action)}${h.note?` <span class="why">„${esc(h.note)}“</span>`:""}</td><td>${esc(h.by||"")}</td></tr>`).join("")}</tbody></table>` : `<div class="empty">Noch keine Entscheidungen.</div>`;
+  return `<article class="legal doc konto gremium">${head}${body}</article>`;
 }
 
 // ---- Mein Konto: eigene Seite mit „Aktivitäten“ und „Einstellungen“
@@ -756,7 +783,7 @@ function kontoHead(u){
     : u.role==="org" ? (u.verified ? `<span class="pill s-konsens">geprüft</span>` : `<span class="pill pend">noch nicht geprüft</span>`) : `<span class="pill s-neu">noch nicht über ID Austria verifiziert</span>`;
   const tab = S.kontoTab;
   return `<div class="lbl">Mein Konto</div><h1>${esc(u.name)}</h1>
-    <div class="kmeta"><span class="pill ${u.role==="bot"?"bot":"role"}">${ROLE_NAMES[u.role]}</span>${st}${u.gremium?`<span class="pill pkg">Zulassungsgremium</span><a class="linkbtn subtle" href="#/statistik">Statistik</a>`:""}${S.act && S.act.member_since ? `<span class="why">dabei seit ${fmtDate(S.act.member_since)}</span>` : ""}</div>
+    <div class="kmeta"><span class="pill ${u.role==="bot"?"bot":"role"}">${ROLE_NAMES[u.role]}</span>${st}${u.gremium?`<a class="pill pkg" href="#/gremium">Zulassungsgremium</a><a class="linkbtn subtle" href="#/gremium/statistik">Statistik</a>`:""}${S.act && S.act.member_since ? `<span class="why">dabei seit ${fmtDate(S.act.member_since)}</span>` : ""}</div>
     <nav class="ktabs" aria-label="Bereiche"><a href="#/konto" aria-current="${tab==="aktiv"}">Aktivitäten</a><a href="#/konto/einstellungen" aria-current="${tab==="einst"}">Einstellungen</a></nav>`;
 }
 function tile(n, l, sub){ return `<div><b>${n}</b><span>${l}</span>${sub?`<span class="sub">${sub}</span>`:""}</div>`; }
@@ -866,7 +893,7 @@ const STAT_ROWS = [
   ["ratings", "Bewertungen"], ["pairs", "Paarvergleiche"], ["packages", "Reformpakete"], ["follows", "Neu gefolgt"], ["reports", "Meldungen"],
 ];
 const STAT_COLS = [["heute","Heute"],["7","7 Tage"],["30","30 Tage"],["365","12 Monate"],["gesamt","Gesamt"]];
-const PAGE_NAMES = {home:"Startseite", law:"Rechtsvorschriften", draft:"Begutachtungsentwürfe", paket:"Reformpakete", zahlen:"Recht in Zahlen", projekt:"Über das Projekt", api:"API & MCP", moderation:"Moderation", konto:"Mein Konto", impressum:"Impressum", datenschutz:"Datenschutz", statistik:"Statistik", other:"Sonstige"};
+const PAGE_NAMES = {home:"Startseite", law:"Rechtsvorschriften", draft:"Begutachtungsentwürfe", paket:"Reformpakete", zahlen:"Recht in Zahlen", projekt:"Über das Projekt", api:"API & MCP", moderation:"Moderation", konto:"Mein Konto", impressum:"Impressum", datenschutz:"Datenschutz", statistik:"Statistik", gremium:"Gremium", other:"Sonstige"};
 function renderStatistik(){
   const u = S.user;
   if (!u || !u.gremium) return `<article class="legal doc"><div class="lbl">Statistik</div><h1>Nur für das Zulassungsgremium</h1><p>Bitte als Gremiumsmitglied anmelden.</p></article>`;
@@ -882,7 +909,8 @@ function renderStatistik(){
   const monLbl = d => ["Jän","Feb","Mär","Apr","Mai","Jun","Jul","Aug","Sep","Okt","Nov","Dez"][+d.slice(5,7)-1]+" "+d.slice(2,4);
   const lawList = (arr, unit) => arr.length ? `<table class="dt"><tbody>${arr.map((x,i) => `<tr><td>${i+1}.</td><td><a href="#/g/${x.gnr}">${esc(x.name)}</a>${x.draft?` <span class="why">Entwurf</span>`:""}</td><td class="num">${nf(x.n)} ${x.n===1 ? unit[0] : unit[1]}</td></tr>`).join("")}</tbody></table>` : `<p class="why">Noch keine Daten.</p>`;
   const pages = Object.entries(cur.pages||{}).sort((a,b) => b[1]-a[1]);
-  return `<article class="legal doc zahlen statistik"><div class="lbl">Nur für das Zulassungsgremium</div><h1>Statistik</h1>
+  return `<article class="legal doc konto zahlen statistik"><div class="lbl">Zulassungsgremium</div><h1>Gremium</h1>
+    <nav class="ktabs" aria-label="Bereiche">${GTABS.map(([k,l]) => `<a href="#/gremium/${k}" aria-current="${k==="statistik"}">${l}</a>`).join("")}</nav>
     <p class="why">Stand ${fmtIso(s.today)}. Aufrufe werden anonym gezählt: nur Tageszahlen, ohne IP-Adressen, Cookies oder Kennungen${t.first_count ? `, seit ${fmtIso(t.first_count)}` : ", ab jetzt"}. Konten, Beiträge und Bewertungen stammen aus der Datenbank und reichen bis zum Start zurück.</p>
     <div class="seg" role="group" aria-label="Zeitraum">${STAT_COLS.map(([k,l]) => `<button data-statp="${k}" aria-pressed="${sel===k}">${l}</button>`).join("")}</div>
     <div class="hero">
@@ -919,7 +947,7 @@ function renderStatistik(){
 function renderPage(){
   const L = LEGAL; let html = "";
   if (S.page==="konto") html = renderKonto();
-  else if (S.page==="statistik") html = renderStatistik();
+  else if (S.page==="gremium") html = renderGremiumPage();
   else if (S.page==="impressum") html = `<article class="legal"><div class="lbl">Rechtliches</div><h1>Impressum und Offenlegung</h1>
     <h2>Medieninhaber und Herausgeber</h2><p>${esc(L.name)}<br>${esc(L.ort)}<br>E-Mail: <a href="mailto:${esc(L.mail)}">${esc(L.mail)}</a></p>
     <h2>Offenlegung nach § 25 Mediengesetz</h2><p>Medieninhaber: ${esc(L.name)}, ${esc(L.ort)}.</p>
@@ -1234,6 +1262,7 @@ curl -X POST "${O}/api/v1/contributions" \\
       <div class="err" id="rerr" hidden></div>
       <div class="row"><button class="btn" type="submit">Passwort speichern</button></div></form></article>`;
   $("law").innerHTML = html;
+  const kt = document.querySelector(".ktabs"), ka = kt && kt.querySelector('a[aria-current="true"]'); if (ka && kt.scrollWidth > kt.clientWidth) kt.scrollLeft = ka.offsetLeft - (kt.clientWidth - ka.offsetWidth)/2;
 }
 
 // ---- Anmeldung und Registrierung
@@ -1347,7 +1376,7 @@ async function share(path){
 }
 function confirmInline(btn, q){ if (btn.dataset.armed) return true; btn.dataset.armed = "1"; btn.textContent = q; setTimeout(() => { delete btn.dataset.armed; }, 4000); return false; }
 function setPanel(v){ S.panel = v; if (v==="gremium") S.gremium=null; if (v==="bots") S.bots=null; updateSide(); renderPanel(); if (sideOn() && (narrow() || S.mode==="home")) $("panel").scrollIntoView({behavior:"smooth", block:"start"}); }
-async function refresh(){ if (S.mode==="law") await loadState(); await loadAll(); if (S.page==="konto" && S.user) await loadActivity(); render(); }
+async function refresh(){ if (S.mode==="law") await loadState(); await loadAll(); if (S.page==="konto" && S.user) await loadActivity(); if (S.page==="gremium" && S.gTab!=="statistik" && S.user && S.user.gremium) await loadGremium(); render(); }
 
 // ---- Ereignisse
 let qTimer = null;
@@ -1429,7 +1458,7 @@ document.addEventListener("click", async e => {
     if (t.dataset.klaw!==undefined){ S.kontoLaw = t.dataset.klaw || null; S.kontoSec = "beitraege"; renderPage(); return; }
     if (t.id==="seenbtn"){ await api("/api/account/seen", {}); await loadActivity(); renderPage(); toast("Als gelesen markiert"); return; }
     if (t.id==="exportbtn"){ const j = await api("/api/account/export"); download(`offenes-recht-meine-daten-${new Date().toISOString().slice(0,10)}.json`, JSON.stringify(j, null, 2)); return; }
-    if (t.id==="grembtn"){ setPanel("gremium"); return; }
+    if (t.id==="grembtn"){ go("#/gremium"); return; }
     if (t.id==="botsbtn"){ setPanel("bots"); return; }
     if (t.id==="howbtn"){ go("#/projekt/bewertung"); return; }
     if (t.id==="ovbtn"){ setPanel("overview"); return; }
@@ -1569,7 +1598,7 @@ document.addEventListener("submit", async e => {
   }
   if (e.target.dataset && e.target.dataset.limit){
     const f = e.target;
-    try { await api("/api/gremium/limit", {user_id:+f.dataset.limit, per_hour:+f.elements.h.value, per_day:+f.elements.d.value}); S.gremium = null; renderPanel(); toast("Limit gespeichert und protokolliert"); }
+    try { await api("/api/gremium/limit", {user_id:+f.dataset.limit, per_hour:+f.elements.h.value, per_day:+f.elements.d.value}); S.gremium = null; await refresh(); toast("Limit gespeichert und protokolliert"); }
     catch(x){ toast(x.message); }
     return;
   }

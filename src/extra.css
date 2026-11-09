@@ -304,3 +304,17 @@ dialog.sharedlg .why{margin:10px 0 0}
 .stattable tr.grp th{text-align:left;font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);padding-top:14px}
 .stattable td.on,.stattable th.on{background:var(--paper);font-weight:600}
 .statistik .hero span.sub{font-size:12px}
+/* 1.10 Gremium als eigene Seite */
+.gremium .gtiles>a{border:1px solid var(--rule);border-radius:8px;padding:12px 14px;background:var(--surface);display:flex;flex-direction:column;gap:2px;text-decoration:none;color:var(--ink)}
+.gremium .gtiles>a:hover{border-color:var(--accent)}
+.gremium .gtiles>a.warn b{color:var(--accent)}
+.konto .ktabs{overflow-x:auto;scrollbar-width:none;white-space:nowrap}
+.konto .ktabs::-webkit-scrollbar{display:none}
+.ktabs .badge{display:inline-block;min-width:18px;padding:0 6px;border-radius:999px;background:var(--accent);color:#fff;font-size:11.5px;line-height:18px;text-align:center;margin-left:4px}
+.gremium .glist{display:grid;grid-template-columns:minmax(0,1fr);gap:12px}
+.gremium .glist .gcard{margin:0}
+.gremium .glist.two{grid-template-columns:repeat(2,minmax(0,1fr));align-items:start}
+.gremium .ghist td{vertical-align:top}
+@media (max-width:760px){.gremium .glist.two{grid-template-columns:minmax(0,1fr)}.konto .hero{grid-template-columns:repeat(2,minmax(0,1fr))}.konto .ktabs a{padding:10px 10px}}
+.gremium .glist .gcard{border:1px solid var(--rule);border-radius:8px;background:var(--surface);padding:14px 16px}
+.konto .ktabs{position:relative}
