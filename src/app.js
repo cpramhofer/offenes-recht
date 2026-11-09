@@ -7,7 +7,7 @@ const RATE = {
 };
 const PILOT = "10007517";
 // Impressum (Offenlegung nach § 25 MedienG) – Angaben des Medieninhabers
-const LEGAL = {name:"Christoph Pramhofer", ort:"Wien", mail:"christoph.pramhofer@neos.eu", stand:"8. November 2026"};
+const LEGAL = {name:"Christoph Pramhofer", ort:"Wien", mail:"christoph.pramhofer@neos.eu", stand:"9. November 2026"};
 
 let S = { user:null, mode:"home", panel:"default", page:null, resetToken:null,
   cat:{q:"", g:"", idx:"", sort:"", rows:[], total:0, stats:null, offset:0}, sach:null,
@@ -71,7 +71,8 @@ function go(hash){ if (location.hash !== hash) location.hash = hash; else route(
 async function route(){
   const p = location.hash.replace(/^#\/?/, "").split("/").filter(Boolean);
   S.compare = false;
-  if (["impressum","datenschutz","reset","api","projekt","moderation","paket","zahlen","konto"].includes(p[0])){
+  if (["impressum","datenschutz","reset","api","projekt","moderation","paket","zahlen","konto","statistik"].includes(p[0])){
+    if (p[0]==="statistik"){ S.stats = null; if (!S.all) await loadAll().catch(()=>{}); if (S.user && S.user.gremium){ try { S.stats = await api("/api/gremium/stats"); } catch(e){ S.stats = {error:e.message}; } } }
     if (p[0]==="konto"){ S.kontoTab = p[1]==="einstellungen" ? "einst" : "aktiv"; if (S.panel==="account") S.panel = "default"; await loadAll().catch(()=>{}); if (S.user) await loadActivity(); }
     if (p[0]==="zahlen"){ try { S.zahlen = await api("/api/zahlen"); } catch(e){ S.zahlen = {error:e.message}; } }
     if (p[0]==="moderation"){ try { S.modlog = await api("/api/moderation"); } catch(e){ S.modlog = {removed:[], stats:{}}; } }
@@ -79,7 +80,7 @@ async function route(){
     S.mode = "home"; S.gnr = null; S.law = null; S.page = p[0]; S.resetToken = p[1] || null;
     if (S.panel==="anchor") S.panel = "default";
     if (!S.all) await loadAll().catch(()=>{});
-    render();
+    render(); hit(["reset"].includes(p[0]) ? "other" : p[0]);
     const anchor = p[0]==="projekt" && p[1] ? $("p-"+p[1]) : null;
     if (anchor) anchor.scrollIntoView({block:"start"}); else window.scrollTo(0,0);
     return;
@@ -93,11 +94,12 @@ async function route(){
     const pid = p[2]==="gesetz" ? first : (p[2] || first);
     if (pid) await openNorm(pid, p.length > 3 ? p.join("/").replace(/^g\//,"") : null);
     else render();
+    hit(S.law && S.law.tgroup==="me" ? "draft" : "law", S.gnr, pid);
   } else {
     S.mode = "home"; S.gnr = null; S.law = null; S.panel = S.panel==="anchor" ? "default" : S.panel;
     if (!S.cat.stats) await loadCatalog(true);
     await Promise.all([loadAll(), loadTopLaws(), api("/api/drafts").then(j => { S.drafts = j.drafts; }).catch(() => { S.drafts = []; })]);
-    render();
+    render(); hit("home");
     if (S.jump){ const el = $(S.jump); S.jump = null; if (el) el.scrollIntoView({block:"start"}); } else window.scrollTo(0,0);
   }
 }
@@ -732,7 +734,7 @@ async function renderGremium(panel){
           <label>Modell<input name="model" value="${esc(b.bot.model)}"></label>
           <div class="why">Das Profil steht öffentlich bei jedem Beitrag des Bots. Änderungen werden mit altem und neuem Wert protokolliert.</div>
           <button class="btn ghost" type="submit">Profil speichern</button></form></details></article>`;
-  panel.innerHTML = `<div class="ph"><div class="lbl">Zulassungsgremium</div><h3 style="margin:4px 0 0;font-size:16px">Offene Anträge (${g.pending.length})</h3>
+  panel.innerHTML = `<div class="ph"><div class="lbl">Zulassungsgremium · <a href="#/statistik">Statistik</a></div><h3 style="margin:4px 0 0;font-size:16px">Offene Anträge (${g.pending.length})</h3>
     <p class="excerpt" style="-webkit-line-clamp:unset">KI-Bots dürfen erst nach Zulassung veröffentlichen. Organisationen schreiben sofort, werden aber erst nach Prüfung als „geprüft“ ausgewiesen. Jede Entscheidung wird protokolliert.</p></div>
     <div class="list">${g.pending.length ? g.pending.map(card).join("") : `<div class="empty">Keine offenen Anträge.</div>`}</div>
     <div class="ph"><div class="lbl">Gemeldete Beiträge (${(g.reports||[]).length})</div><p class="why" style="margin:4px 0 0">Entfernt werden nur rechtswidrige Inhalte, persönliche Angriffe, Spam und nicht gekennzeichnete Bots. Meinungen bleiben stehen. Jede Entscheidung erscheint im <a href="#/moderation">Moderationsprotokoll</a>.</p></div>
@@ -754,7 +756,7 @@ function kontoHead(u){
     : u.role==="org" ? (u.verified ? `<span class="pill s-konsens">geprüft</span>` : `<span class="pill pend">noch nicht geprüft</span>`) : `<span class="pill s-neu">noch nicht über ID Austria verifiziert</span>`;
   const tab = S.kontoTab;
   return `<div class="lbl">Mein Konto</div><h1>${esc(u.name)}</h1>
-    <div class="kmeta"><span class="pill ${u.role==="bot"?"bot":"role"}">${ROLE_NAMES[u.role]}</span>${st}${u.gremium?`<span class="pill pkg">Zulassungsgremium</span>`:""}${S.act && S.act.member_since ? `<span class="why">dabei seit ${fmtDate(S.act.member_since)}</span>` : ""}</div>
+    <div class="kmeta"><span class="pill ${u.role==="bot"?"bot":"role"}">${ROLE_NAMES[u.role]}</span>${st}${u.gremium?`<span class="pill pkg">Zulassungsgremium</span><a class="linkbtn subtle" href="#/statistik">Statistik</a>`:""}${S.act && S.act.member_since ? `<span class="why">dabei seit ${fmtDate(S.act.member_since)}</span>` : ""}</div>
     <nav class="ktabs" aria-label="Bereiche"><a href="#/konto" aria-current="${tab==="aktiv"}">Aktivitäten</a><a href="#/konto/einstellungen" aria-current="${tab==="einst"}">Einstellungen</a></nav>`;
 }
 function tile(n, l, sub){ return `<div><b>${n}</b><span>${l}</span>${sub?`<span class="sub">${sub}</span>`:""}</div>`; }
@@ -844,10 +846,80 @@ function renderKonto(){
   return `<article class="legal doc konto">${kontoHead(u)}${S.kontoTab==="einst" ? renderKontoEinst(u) : renderKontoAktiv(u)}</article>`;
 }
 
+// ---- Anonyme Zählung: eine Seite pro Wechsel von Seite, Gesetz oder Paragraph; „neu“ nur beim ersten Aufruf im Tab
+function hit(page, g, pid){
+  const key = page+"|"+(g||"")+"|"+(pid||"");
+  if (S.lastHit===key) return; S.lastHit = key;
+  let fresh = false;
+  try { if (!sessionStorage.getItem("or_v")){ sessionStorage.setItem("or_v", "1"); fresh = true; } } catch(e){}
+  fetch("/api/hit", {method:"POST", headers:{"Content-Type":"application/json", "X-OR":"1"}, body:JSON.stringify({p:page, g:g||null, new:fresh}), keepalive:true}).catch(()=>{});
+}
+
+// ---- Statistik (Gremium)
+const STAT_ROWS = [
+  ["Besuch", null],
+  ["visits", "Besuche"], ["views", "Seitenaufrufe"], ["share", "Aufrufe geteilter Links"], ["rss", "RSS-Abrufe"], ["api", "API-Aufrufe (REST)"], ["mcp", "MCP-Aufrufe"],
+  ["Konten", null],
+  ["accounts", "Neue Konten"], ["citizens", "davon Bürgerinnen und Bürger"], ["orgs", "davon Organisationen"], ["bots", "davon KI-Bots"], ["active", "Aktive Konten (geschrieben oder bewertet)"],
+  ["Beteiligung", null],
+  ["contributions", "Beiträge"], ["comments", "davon Kommentare"], ["proposals", "davon Änderungsvorschläge"], ["repeals", "davon Streichungen"], ["via_api", "davon über API/MCP"],
+  ["ratings", "Bewertungen"], ["pairs", "Paarvergleiche"], ["packages", "Reformpakete"], ["follows", "Neu gefolgt"], ["reports", "Meldungen"],
+];
+const STAT_COLS = [["heute","Heute"],["7","7 Tage"],["30","30 Tage"],["365","12 Monate"],["gesamt","Gesamt"]];
+const PAGE_NAMES = {home:"Startseite", law:"Rechtsvorschriften", draft:"Begutachtungsentwürfe", paket:"Reformpakete", zahlen:"Recht in Zahlen", projekt:"Über das Projekt", api:"API & MCP", moderation:"Moderation", konto:"Mein Konto", impressum:"Impressum", datenschutz:"Datenschutz", statistik:"Statistik", other:"Sonstige"};
+function renderStatistik(){
+  const u = S.user;
+  if (!u || !u.gremium) return `<article class="legal doc"><div class="lbl">Statistik</div><h1>Nur für das Zulassungsgremium</h1><p>Bitte als Gremiumsmitglied anmelden.</p></article>`;
+  const s = S.stats;
+  if (!s) return `<article class="legal doc"><div class="lbl">Statistik</div><h1>Statistik</h1><div class="empty">Lade …</div></article>`;
+  if (s.error) return `<article class="legal doc"><h1>Statistik</h1><p>${esc(s.error)}</p></article>`;
+  const P = s.periods, sel = S.statPeriod || "30", cur = P[sel], t = s.totals;
+  const acc = t.accounts || {};
+  const rows = STAT_ROWS.map(([k, l]) => l===null ? `<tr class="grp"><th colspan="6">${k}</th></tr>`
+    : `<tr><td>${l}</td>${STAT_COLS.map(([c]) => `<td class="num ${c===sel?"on":""}">${nf(P[c][k]||0)}</td>`).join("")}</tr>`).join("");
+  const series = (arr, key, fmt) => arr.map(x => [fmt(x.d), x[key], x.d]);
+  const dayLbl = d => d.slice(8,10)+"."+d.slice(5,7)+".";
+  const monLbl = d => ["Jän","Feb","Mär","Apr","Mai","Jun","Jul","Aug","Sep","Okt","Nov","Dez"][+d.slice(5,7)-1]+" "+d.slice(2,4);
+  const lawList = (arr, unit) => arr.length ? `<table class="dt"><tbody>${arr.map((x,i) => `<tr><td>${i+1}.</td><td><a href="#/g/${x.gnr}">${esc(x.name)}</a>${x.draft?` <span class="why">Entwurf</span>`:""}</td><td class="num">${nf(x.n)} ${x.n===1 ? unit[0] : unit[1]}</td></tr>`).join("")}</tbody></table>` : `<p class="why">Noch keine Daten.</p>`;
+  const pages = Object.entries(cur.pages||{}).sort((a,b) => b[1]-a[1]);
+  return `<article class="legal doc zahlen statistik"><div class="lbl">Nur für das Zulassungsgremium</div><h1>Statistik</h1>
+    <p class="why">Stand ${fmtIso(s.today)}. Aufrufe werden anonym gezählt: nur Tageszahlen, ohne IP-Adressen, Cookies oder Kennungen${t.first_count ? `, seit ${fmtIso(t.first_count)}` : ", ab jetzt"}. Konten, Beiträge und Bewertungen stammen aus der Datenbank und reichen bis zum Start zurück.</p>
+    <div class="seg" role="group" aria-label="Zeitraum">${STAT_COLS.map(([k,l]) => `<button data-statp="${k}" aria-pressed="${sel===k}">${l}</button>`).join("")}</div>
+    <div class="hero">
+      <div><b>${nf(cur.visits)}</b><span>Besuche</span><span class="sub">${nf(cur.views)} Seitenaufrufe</span></div>
+      <div><b>${nf(cur.accounts)}</b><span>neue Konten</span><span class="sub">${nf(cur.active)} aktiv</span></div>
+      <div><b>${nf(cur.contributions)}</b><span>Beiträge</span><span class="sub">${nf(cur.proposals + cur.repeals)} Vorschläge, ${nf(cur.comments)} Kommentare</span></div>
+      <div><b>${nf(cur.ratings)}</b><span>Bewertungen</span><span class="sub">${nf(cur.api + cur.mcp)} ${cur.api + cur.mcp===1?"Aufruf":"Aufrufe"} über API/MCP</span></div>
+    </div>
+    <h2>Übersicht nach Zeitraum</h2>
+    <div class="tablewrap"><table class="dt stattable"><thead><tr><th></th>${STAT_COLS.map(([c,l]) => `<th class="num ${c===sel?"on":""}">${l}</th>`).join("")}</tr></thead><tbody>${rows}</tbody></table></div>
+    <h2>Letzte 30 Tage</h2>
+    <h3>Besuche pro Tag</h3>${barChart(series(s.daily, "visits", dayLbl), {unit:"Besuche", every:5})}
+    <h3>Beiträge pro Tag</h3>${barChart(series(s.daily, "contributions", dayLbl), {unit:"Beiträge", every:5})}
+    <h3>Bewertungen pro Tag</h3>${barChart(series(s.daily, "ratings", dayLbl), {unit:"Bewertungen", every:5})}
+    <h2>Letzte 12 Monate</h2>
+    <h3>Beiträge pro Monat</h3>${barChart(series(s.monthly, "contributions", monLbl), {unit:"Beiträge", every:1})}
+    <h3>Neue Konten pro Monat</h3>${barChart(series(s.monthly, "accounts", monLbl), {unit:"neue Konten", every:1})}
+    <h3>Besuche pro Monat</h3>${barChart(series(s.monthly, "visits", monLbl), {unit:"Besuche", every:1})}
+    <h2>Rechtsvorschriften (30 Tage)</h2>
+    <div class="tops"><section><h3>Meistbesucht</h3>${lawList(s.viewed_laws, ["Aufruf","Aufrufe"])}</section><section><h3>Meiste Beiträge</h3>${lawList(s.active_laws, ["Beitrag","Beiträge"])}</section></div>
+    <h2>Seiten (${STAT_COLS.find(c => c[0]===sel)[1]})</h2>
+    ${pages.length ? `<table class="dt"><tbody>${pages.map(([k,n]) => `<tr><td>${esc(PAGE_NAMES[k]||k)}</td><td class="num">${nf(n)}</td></tr>`).join("")}</tbody></table>` : `<p class="why">Noch keine Aufrufe gezählt.</p>`}
+    <h2>Bestand</h2>
+    <div class="hero small">
+      <div><b>${nf(acc.citizen||0)}</b><span>Bürgerinnen und Bürger</span></div>
+      <div><b>${nf((acc.org||0))}</b><span>Organisationen</span></div>
+      <div><b>${nf(acc.bot||0)}</b><span>KI-Bots</span></div>
+      <div><b>${nf(t.contributions)}</b><span>Beiträge</span><span class="sub">${nf(t.removed)} entfernt · ${nf(t.ratings)} Bewertungen · ${nf(t.packages)} Pakete</span></div>
+    </div>
+  </article>`;
+}
+
 // ---- Rechtliches und Passwort-Link
 function renderPage(){
   const L = LEGAL; let html = "";
   if (S.page==="konto") html = renderKonto();
+  else if (S.page==="statistik") html = renderStatistik();
   else if (S.page==="impressum") html = `<article class="legal"><div class="lbl">Rechtliches</div><h1>Impressum und Offenlegung</h1>
     <h2>Medieninhaber und Herausgeber</h2><p>${esc(L.name)}<br>${esc(L.ort)}<br>E-Mail: <a href="mailto:${esc(L.mail)}">${esc(L.mail)}</a></p>
     <h2>Offenlegung nach § 25 Mediengesetz</h2><p>Medieninhaber: ${esc(L.name)}, ${esc(L.ort)}.</p>
@@ -863,6 +935,7 @@ function renderPage(){
     <ul><li><b>Konto:</b> E-Mail-Adresse, Name oder Pseudonym, Passwort (nur als nicht umkehrbarer Hash), Kontoart; bei Organisationen die Register-Nummer, bei KI-Bots Auftraggeber, Auftrag, Betreiber und Modell.</li>
     <li><b>Beiträge:</b> Kommentare und Änderungsvorschläge mit Zeitpunkt und Bezug auf die Rechtsstelle.</li>
     <li><b>Bewertungen und Paarvergleiche:</b> Ihre Stimme zu einzelnen Beiträgen und Reformpaketen.</li>
+    <li><b>Zugriffszahlen:</b> Wir zählen Aufrufe anonym als reine Tageszahlen je Seite und Rechtsvorschrift. Dafür werden weder IP-Adressen noch Cookies oder sonstige Kennungen gespeichert; ob ein Aufruf der erste in einem Browser-Tab ist, merkt sich nur Ihr Browser (sessionStorage) und meldet es als „neu“.</li>
     <li><b>Gefolgte Inhalte:</b> Welchen Gesetzen, Entwürfen, Beiträgen und Paketen Sie folgen, und die gewählte Häufigkeit der Benachrichtigungen. Daraus erstellen wir die E-Mail-Zusammenfassung; abbestellen können Sie sie mit einem Klick in jeder E-Mail oder unter „Mein Konto“.</li>
     <li><b>Technisch:</b> ein Sitzungscookie für die Anmeldung. Der Webserver protokolliert IP-Adressen zur Fehlersuche und Missbrauchsabwehr; diese Protokolle werden nach spätestens 14 Tagen gelöscht.</li></ul>
     <h2>Was öffentlich sichtbar ist</h2><p>Ihr Name oder Pseudonym und Ihre Beiträge. <b>Bewertungen und Paarvergleiche werden nie personenbezogen veröffentlicht</b>, nur als Summen. Die E-Mail-Adresse ist nicht öffentlich.</p>
@@ -1350,6 +1423,7 @@ document.addEventListener("click", async e => {
     if (t.id==="regbtn"){ openAuth("register"); return; }
     if (t.id==="logoutbtn"){ await api("/api/logout", {}); S.panel = S.mode==="law"?"anchor":"default"; await refresh(); toast("Abgemeldet"); return; }
     if (t.id==="acctbtn"){ go("#/konto"); return; }
+    if (t.dataset.statp){ S.statPeriod = t.dataset.statp; renderPage(); return; }
     if (t.dataset.ksec){ S.kontoSec = t.dataset.ksec; renderPage(); return; }
     if (t.dataset.kfilter){ S.kontoFilter = t.dataset.kfilter; renderPage(); return; }
     if (t.dataset.klaw!==undefined){ S.kontoLaw = t.dataset.klaw || null; S.kontoSec = "beitraege"; renderPage(); return; }

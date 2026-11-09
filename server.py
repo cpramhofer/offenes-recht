@@ -59,6 +59,7 @@ CREATE TABLE IF NOT EXISTS drafts(gnr TEXT PRIMARY KEY, gp TEXT, inr INTEGER, ti
   einlangen TEXT, url TEXT, active INTEGER DEFAULT 0, statements INTEGER DEFAULT 0, synced INTEGER);
 CREATE TABLE IF NOT EXISTS follows(user_id INTEGER NOT NULL, kind TEXT NOT NULL, ref TEXT NOT NULL, created INTEGER NOT NULL,
   seen_count INTEGER, seen_status TEXT, PRIMARY KEY(user_id, kind, ref));
+CREATE TABLE IF NOT EXISTS stats_daily(day TEXT NOT NULL, metric TEXT NOT NULL, n INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(day, metric));
 CREATE TABLE IF NOT EXISTS anomaly_reviews(fid TEXT PRIMARY KEY, decision TEXT, by_user INTEGER, at INTEGER, note TEXT);
 CREATE TABLE IF NOT EXISTS resets(token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL, expires INTEGER NOT NULL, used INTEGER DEFAULT 0);
 """
@@ -909,7 +910,7 @@ def need(cond, code, msg):
     if not cond: raise ApiError(code, msg)
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "OffenesRecht/1.8.3"
+    server_version = "OffenesRecht/1.9"
 
     def log_message(self, fmt, *a):
         # bewusst ohne IP-Adresse (Datenschutz); Fehlersuche über Pfad und Status
@@ -938,11 +939,13 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         for k, v in extra_headers: self.send_header(k, v)
         self.send_cors()
-        self.send_header("Content-Length", str(len(body))); self.end_headers(); self.wfile.write(body)
+        self.send_header("Content-Length", str(len(body))); self.end_headers()
+        if not self._head: self.wfile.write(body)
 
     def send_raw(self, code, ctype, data):
         self.send_response(code); self.send_header("Content-Type", ctype); self.send_header("Cache-Control", "no-cache")
-        self.send_header("X-Content-Type-Options", "nosniff"); self.send_header("Content-Length", str(len(data))); self.end_headers(); self.wfile.write(data)
+        self.send_header("X-Content-Type-Options", "nosniff"); self.send_header("Content-Length", str(len(data))); self.end_headers()
+        if not self._head: self.wfile.write(data)
 
     def send_static(self, path):
         name = "index.html" if path in ("/", "") else path.lstrip("/")
@@ -958,7 +961,8 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-cache")
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("Referrer-Policy", "same-origin")
-        self.send_header("Content-Length", str(len(data))); self.end_headers(); self.wfile.write(data)
+        self.send_header("Content-Length", str(len(data))); self.end_headers()
+        if not self._head: self.wfile.write(data)
 
     # --- Anfrage
     def body(self):
@@ -987,7 +991,9 @@ class Handler(BaseHTTPRequestHandler):
         if SECURE_COOKIE: parts.append("Secure")
         return ("Set-Cookie", "; ".join(parts))
 
+    _head = False
     def do_GET(self): self.dispatch("GET")
+    def do_HEAD(self): self._head = True; self.dispatch("GET")   # wie GET, aber ohne Inhalt (Link-Prüfer, Monitoring)
     def do_POST(self): self.dispatch("POST")
     def do_OPTIONS(self): self.dispatch("OPTIONS")
     def do_DELETE(self): self.dispatch("DELETE")
@@ -1003,8 +1009,10 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/mcp":
                 if method != "POST":
                     return self.send_json(405, {"error": "Der MCP-Server nimmt nur POST (JSON-RPC) entgegen. Anleitung: " + PUBLIC_URL + "/#/api"}, [("Allow", "POST, OPTIONS")])
+                bump("mcp")
                 return mcp_http(self)
             if path.startswith("/api/v1/"):
+                bump("api")
                 for m, rx, fn in API_PATTERNS:
                     mt = rx.match(path)
                     if mt and m == method:
@@ -1013,12 +1021,14 @@ class Handler(BaseHTTPRequestHandler):
             if path.startswith("/.well-known/"):   # keine OAuth-/OpenID-Metadaten: ehrliches 404 statt der Startseite
                 raise ApiError(404, "Nicht vorhanden.")
             if re.fullmatch(r"/(v|p|e)/\d{1,9}", path) and method == "GET":
+                bump("share")
                 return self.send_raw(200, "text/html; charset=utf-8", share_page(path))
             if path == "/og.png" and method == "GET":
                 return self.send_raw(200, "image/png", og_png())
             if path.startswith("/feed/") or path == "/abmelden":
                 need(method == "GET", 405, "Methode nicht erlaubt.")
                 if path == "/abmelden": return self.send_raw(200, "text/html; charset=utf-8", unsubscribe_page(self.query))
+                bump("rss")
                 return self.send_raw(200, "application/rss+xml; charset=utf-8", feed(path))
             if not path.startswith("/api/"):
                 need(method == "GET", 405, "Methode nicht erlaubt.")
@@ -1562,7 +1572,7 @@ def r_norm(h):
 # mit API-Schlüssel (Authorization: Bearer …). REST und MCP verwenden dieselben Kernfunktionen.
 from urllib.parse import unquote
 
-APP_VERSION = "1.8.3"
+APP_VERSION = "1.9"
 READ_LIMIT_PER_MIN = int(os.environ.get("OR_API_READ_LIMIT", "120"))
 WRITE_LIMIT_PER_HOUR = int(os.environ.get("OR_API_WRITE_HOUR", "20"))
 WRITE_LIMIT_PER_DAY = int(os.environ.get("OR_API_WRITE_DAY", "100"))
@@ -2907,6 +2917,110 @@ def search_acts(q):
 
 def r_acts(h): return search_acts(h.query.get("q", ""))
 
+# ---------- Statistik (nur Gremium) ----------
+# Aufrufe werden anonym gezählt: nur Tageszahlen je Kennzahl, keine IP-Adressen, keine Cookies, keine Kennungen.
+# Ein „Besuch“ ist die erste Seite in einem Browser-Tab (sessionStorage im Browser, nichts davon wird übertragen
+# außer dem Hinweis „neu“). Alle übrigen Zahlen kommen rückwirkend aus der Datenbank.
+try:
+    from zoneinfo import ZoneInfo
+    _TZ = ZoneInfo("Europe/Vienna")
+except Exception:
+    _TZ = None
+def _today(ts=None):
+    d = datetime.datetime.fromtimestamp(ts if ts is not None else time.time(), _TZ) if _TZ else datetime.datetime.fromtimestamp(ts or time.time())
+    return d.date()
+
+HIT_PAGES = {"home", "law", "draft", "paket", "zahlen", "projekt", "api", "moderation", "konto", "impressum", "datenschutz", "statistik", "other"}
+def bump(metric, n=1):
+    try:
+        c = db()
+        c.execute("INSERT INTO stats_daily(day,metric,n) VALUES(?,?,?) ON CONFLICT(day,metric) DO UPDATE SET n=n+excluded.n",
+                  (_today().isoformat(), metric[:60], n))
+        c.commit()
+    except Exception as e:
+        sys.stderr.write("Statistik: %r\n" % e)
+
+def r_hit(h):
+    d = h.body(); p = d.get("p") if d.get("p") in HIT_PAGES else "other"
+    bump("views"); bump("views:" + p)
+    if d.get("new"): bump("visits")
+    g = str(d.get("g") or "")
+    if re.fullmatch(r"\d{8}", g): bump("law:" + g)
+    return {"ok": True}
+
+def _ts_start(day):
+    dt = datetime.datetime.combine(day, datetime.time.min)
+    return int(dt.replace(tzinfo=_TZ).timestamp()) if _TZ else int(time.mktime(dt.timetuple()))
+
+def r_g_stats(h):
+    require_gremium(h); c = db()
+    today = _today()
+    periods = {"heute": today, "7": today - datetime.timedelta(days=6), "30": today - datetime.timedelta(days=29),
+               "365": today - datetime.timedelta(days=364), "gesamt": datetime.date(2000, 1, 1)}
+    def counts(since_day):
+        t = _ts_start(since_day); d = since_day.isoformat()
+        one = lambda q, *a: c.execute(q, a).fetchone()[0]
+        daily = {r["metric"]: r["n"] for r in c.execute("SELECT metric, SUM(n) n FROM stats_daily WHERE day>=? GROUP BY metric", (d,))}
+        roles = {r["role"]: r["n"] for r in c.execute("SELECT role, COUNT(*) n FROM users WHERE created>=? AND role!='deleted' GROUP BY role", (t,))}
+        contrib = c.execute("""SELECT SUM(type='com') com, SUM(type='prop' AND COALESCE(op,'')!='repeal') prop, SUM(op='repeal') rep,
+                               SUM(via='api') api, COUNT(*) n FROM contributions WHERE created>=?""", (t,)).fetchone()
+        active = one("""SELECT COUNT(DISTINCT u) FROM (SELECT user_id u FROM contributions WHERE created>=? UNION SELECT user_id FROM ratings WHERE created>=?
+                        UNION SELECT user_id FROM pairwise WHERE created>=? UNION SELECT user_id FROM package_ratings WHERE created>=?)""", t, t, t, t)
+        return {"visits": daily.get("visits", 0), "views": daily.get("views", 0), "api": daily.get("api", 0), "mcp": daily.get("mcp", 0),
+                "share": daily.get("share", 0), "rss": daily.get("rss", 0),
+                "accounts": sum(roles.values()), "citizens": roles.get("citizen", 0), "orgs": roles.get("org", 0), "bots": roles.get("bot", 0),
+                "active": active, "contributions": contrib["n"] or 0, "comments": contrib["com"] or 0, "proposals": contrib["prop"] or 0,
+                "repeals": contrib["rep"] or 0, "via_api": contrib["api"] or 0,
+                "ratings": one("SELECT COUNT(*) FROM ratings WHERE created>=?", t) + one("SELECT COUNT(*) FROM package_ratings WHERE created>=?", t),
+                "pairs": one("SELECT COUNT(*) FROM pairwise WHERE created>=?", t),
+                "packages": one("SELECT COUNT(*) FROM packages WHERE created>=?", t),
+                "reports": one("SELECT COUNT(*) FROM reports WHERE created>=?", t),
+                "follows": one("SELECT COUNT(*) FROM follows WHERE created>=?", t),
+                "pages": {k.split(":", 1)[1]: v for k, v in daily.items() if k.startswith("views:")}}
+    def series(days):
+        out = []
+        for i in range(days - 1, -1, -1):
+            day = today - datetime.timedelta(days=i); t0, t1 = _ts_start(day), _ts_start(day + datetime.timedelta(days=1))
+            m = {r["metric"]: r["n"] for r in c.execute("SELECT metric, n FROM stats_daily WHERE day=? AND metric IN ('visits','views')", (day.isoformat(),))}
+            out.append({"d": day.isoformat(), "visits": m.get("visits", 0), "views": m.get("views", 0),
+                        "contributions": c.execute("SELECT COUNT(*) FROM contributions WHERE created>=? AND created<?", (t0, t1)).fetchone()[0],
+                        "ratings": c.execute("SELECT COUNT(*) FROM ratings WHERE created>=? AND created<?", (t0, t1)).fetchone()[0],
+                        "accounts": c.execute("SELECT COUNT(*) FROM users WHERE created>=? AND created<? AND role!='deleted'", (t0, t1)).fetchone()[0]})
+        return out
+    def months(n):
+        out = []; y, m = today.year, today.month
+        keys = []
+        for _ in range(n):
+            keys.append((y, m)); m -= 1
+            if m == 0: y, m = y - 1, 12
+        for y, m in reversed(keys):
+            a = datetime.date(y, m, 1); b = datetime.date(y + (m == 12), m % 12 + 1, 1)
+            t0, t1 = _ts_start(a), _ts_start(b)
+            v = {r["metric"]: r["n"] for r in c.execute("SELECT metric, SUM(n) n FROM stats_daily WHERE day>=? AND day<? AND metric IN ('visits','views') GROUP BY metric", (a.isoformat(), b.isoformat()))}
+            out.append({"d": f"{y}-{m:02d}", "visits": v.get("visits", 0), "views": v.get("views", 0),
+                        "contributions": c.execute("SELECT COUNT(*) FROM contributions WHERE created>=? AND created<?", (t0, t1)).fetchone()[0],
+                        "ratings": c.execute("SELECT COUNT(*) FROM ratings WHERE created>=? AND created<?", (t0, t1)).fetchone()[0],
+                        "accounts": c.execute("SELECT COUNT(*) FROM users WHERE created>=? AND created<? AND role!='deleted'", (t0, t1)).fetchone()[0]})
+        return out
+    d30 = periods["30"].isoformat(); t30 = _ts_start(periods["30"])
+    viewed = [{"gnr": r["metric"][4:], "n": r["n"]} for r in c.execute(
+        "SELECT metric, SUM(n) n FROM stats_daily WHERE day>=? AND metric LIKE 'law:%' GROUP BY metric ORDER BY n DESC LIMIT 15", (d30,))]
+    active_laws = [{"gnr": r["g"], "n": r["n"]} for r in c.execute(
+        "SELECT substr(key,1,8) g, COUNT(*) n FROM contributions WHERE created>=? GROUP BY g ORDER BY n DESC LIMIT 15", (t30,))]
+    for lst in (viewed, active_laws):
+        for x in lst:
+            l = c.execute("SELECT kurztitel, abk, tgroup FROM laws WHERE gnr=?", (x["gnr"],)).fetchone()
+            x["name"] = (l["abk"] or l["kurztitel"]) if l else x["gnr"]; x["draft"] = bool(l and l["tgroup"] == "me")
+    totals = {"accounts": {r["role"]: r["n"] for r in c.execute("SELECT role, COUNT(*) n FROM users WHERE role!='deleted' GROUP BY role")},
+              "contributions": c.execute("SELECT COUNT(*) FROM contributions WHERE removed_at IS NULL").fetchone()[0],
+              "removed": c.execute("SELECT COUNT(*) FROM contributions WHERE removed_at IS NOT NULL").fetchone()[0],
+              "ratings": c.execute("SELECT COUNT(*) FROM ratings").fetchone()[0],
+              "packages": c.execute("SELECT COUNT(*) FROM packages WHERE removed_at IS NULL").fetchone()[0],
+              "follows": c.execute("SELECT COUNT(*) FROM follows").fetchone()[0],
+              "first_count": (c.execute("SELECT MIN(day) FROM stats_daily").fetchone() or [None])[0]}
+    return {"periods": {k: counts(v) for k, v in periods.items()}, "daily": series(30), "monthly": months(12),
+            "viewed_laws": viewed, "active_laws": active_laws, "totals": totals, "today": today.isoformat()}
+
 # ---------- Reformpakete ----------
 PKG_MAX = 100
 def _pkg_items(c, pid):
@@ -3063,7 +3177,7 @@ ROUTES = {
     ("POST", "/api/package/update"): r_package_update, ("POST", "/api/package/add"): r_package_add, ("POST", "/api/package/rate"): r_package_rate,
     ("GET", "/api/draft"): r_draft, ("GET", "/api/drafts"): r_drafts,
     ("GET", "/api/gremium/anomalies"): r_g_anomalies, ("POST", "/api/gremium/hold"): r_g_hold,
-    ("GET", "/api/acts"): r_acts,
+    ("GET", "/api/acts"): r_acts, ("POST", "/api/hit"): r_hit, ("GET", "/api/gremium/stats"): r_g_stats,
     ("GET", "/api/account/activity"): r_activity, ("POST", "/api/account/seen"): r_seen,
     ("POST", "/api/account/name"): r_rename, ("GET", "/api/account/export"): r_export,
     ("POST", "/api/follow"): r_follow, ("GET", "/api/follows"): r_follows, ("POST", "/api/account/notify"): r_notify, ("GET", "/api/references"): r_references, ("GET", "/api/zahlen"): r_zahlen,

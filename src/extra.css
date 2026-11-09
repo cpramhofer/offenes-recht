@@ -296,3 +296,11 @@ dialog.sharedlg .why{margin:10px 0 0}
 .actsbox .chips{display:flex;flex-wrap:wrap;gap:6px}
 .actsbox a.chip{text-decoration:none}
 .actsbox a.chip b{color:var(--accent)}
+/* 1.9: Statistik */
+.statistik .seg{margin:6px 0 16px;flex-wrap:wrap}
+.statistik h3{font-size:14px;margin:14px 0 2px}
+.tablewrap{overflow-x:auto;max-width:100%}
+.stattable{min-width:560px}
+.stattable tr.grp th{text-align:left;font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);padding-top:14px}
+.stattable td.on,.stattable th.on{background:var(--paper);font-weight:600}
+.statistik .hero span.sub{font-size:12px}
