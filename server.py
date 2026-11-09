@@ -366,7 +366,7 @@ import urllib.request, urllib.parse, xml.etree.ElementTree as ET, datetime
 from concurrent.futures import ThreadPoolExecutor
 
 RIS_API = "https://data.bka.gv.at/ris/api/v2.6/Bundesrecht"
-RIS_UA = "OffenesRecht-Pilot/0.3 (+https://deregulierung.milei.eu)"
+RIS_UA = "OffenesRecht/1 (+" + os.environ.get("OR_PUBLIC_URL", "https://offenesrecht.at") + ")"
 RIS_DELAY = float(os.environ.get("OR_RIS_DELAY", "0.4"))   # Pause zwischen Anfragen im Hintergrund
 PILOT_GNR = "10007517"   # Gewerbeordnung 1994
 _ris_lock = threading.Lock()
@@ -909,7 +909,7 @@ def need(cond, code, msg):
     if not cond: raise ApiError(code, msg)
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "OffenesRecht/1.8.1"
+    server_version = "OffenesRecht/1.8.2"
 
     def log_message(self, fmt, *a):
         # bewusst ohne IP-Adresse (Datenschutz); Fehlersuche über Pfad und Status
@@ -952,6 +952,7 @@ class Handler(BaseHTTPRequestHandler):
         ctype = {".html": "text/html; charset=utf-8", ".js": "text/javascript", ".css": "text/css",
                  ".svg": "image/svg+xml", ".png": "image/png", ".ico": "image/x-icon"}.get(os.path.splitext(full)[1], "application/octet-stream")
         data = open(full, "rb").read()
+        if full.endswith(".html"): data = data.replace(b"__PUBLIC_URL__", PUBLIC_URL.encode())
         self.send_response(200)
         self.send_header("Content-Type", ctype)
         self.send_header("Cache-Control", "no-cache")
@@ -1389,7 +1390,7 @@ def r_g_decide(h):
 
 # ---------- Mail, Passwort, Konto ----------
 import smtplib, email.message, email.utils
-PUBLIC_URL = os.environ.get("OR_PUBLIC_URL", "https://deregulierung.milei.eu")
+PUBLIC_URL = os.environ.get("OR_PUBLIC_URL", "https://offenesrecht.at").rstrip("/")
 CONSENT_VERSION = "2026-11-06"
 
 def send_mail(to, subject, text):
@@ -1559,7 +1560,7 @@ def r_norm(h):
 # mit API-Schlüssel (Authorization: Bearer …). REST und MCP verwenden dieselben Kernfunktionen.
 from urllib.parse import unquote
 
-APP_VERSION = "1.8.1"
+APP_VERSION = "1.8.2"
 READ_LIMIT_PER_MIN = int(os.environ.get("OR_API_READ_LIMIT", "120"))
 WRITE_LIMIT_PER_HOUR = int(os.environ.get("OR_API_WRITE_HOUR", "20"))
 WRITE_LIMIT_PER_DAY = int(os.environ.get("OR_API_WRITE_DAY", "100"))

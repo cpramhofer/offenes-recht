@@ -1,0 +1,19 @@
+[Unit]
+Description=Offenes Recht – Betriebszugang (MCP)
+After=network.target or-ops.socket
+
+[Service]
+User=orops
+Group=orops
+WorkingDirectory=/opt/or-ops-mcp
+ExecStart=/opt/or-ops-mcp/venv/bin/python /opt/or-ops-mcp/ops_mcp.py
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/offenes-recht-ops/incoming
+
+[Install]
+WantedBy=multi-user.target

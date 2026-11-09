@@ -1,0 +1,163 @@
+#!/usr/bin/env bash
+# or-ops – eng begrenzte Betriebsbefehle für Offenes Recht.
+# Läuft als root (systemd-Socket), wird vom Betriebszugang (MCP) aufgerufen.
+# Jede Aktion ist fest verdrahtet; Argumente werden streng geprüft. Ausgabe: JSON.
+set -euo pipefail
+umask 027
+
+SVC=offenes-recht
+APP=/opt/offenes-recht
+DATA=/var/lib/offenes-recht
+DB=$DATA/app.db
+OPS=/var/lib/offenes-recht-ops
+INCOMING=$OPS/incoming/package.tar.gz
+BK=$DATA/backups
+PORT="$(systemctl show -p ExecStart "$SVC" 2>/dev/null | grep -oE -- '--port [0-9]+' | awk '{print $2}' | head -n1 || true)"
+PORT="${PORT:-8790}"
+LOG=$OPS/or-ops.log
+REPO=cpramhofer/offenes-recht
+
+j() { python3 -c 'import json,sys; c={"true":True,"false":False}; print(json.dumps({k:c.get(v,v) for k,v in zip(sys.argv[1::2], sys.argv[2::2])}, ensure_ascii=False))' "$@"; }
+fail() { j ok false error "$1"; exit 1; }
+audit() { echo "$(date -Is) ${SUDO_USER:-?} $*" >> "$LOG"; }
+health() { curl -fsS -m 5 "http://127.0.0.1:$PORT/api/me" >/dev/null 2>&1; }
+version() { cat "$APP/VERSION" 2>/dev/null || echo unbekannt; }
+
+db_backup() {  # $1 = Kennzeichnung
+  mkdir -p "$BK"; local f="$BK/app-$(date +%Y%m%d-%H%M%S)-$1.db"
+  [[ -f "$DB" ]] || { echo ""; return; }
+  python3 - "$DB" "$f" <<'PY'
+import sqlite3, sys
+src = sqlite3.connect(sys.argv[1]); dst = sqlite3.connect(sys.argv[2]); src.backup(dst); dst.close(); src.close()
+PY
+  chown offenes-recht:offenes-recht "$f"; chmod 0640 "$f"
+  { ls -1t "$BK"/app-*.db 2>/dev/null || true; } | tail -n +31 | xargs -r rm -f --   # höchstens 30 Sicherungen behalten
+  echo "$f"
+}
+
+ACTION="${1:-}"; shift || true
+case "$ACTION" in
+  status)
+    st="$(systemctl is-active "$SVC" 2>/dev/null || true)"
+    h=nein; health && h=ja
+    since="$(systemctl show -p ActiveEnterTimestamp --value "$SVC" 2>/dev/null || true)"
+    size="$(stat -c %s "$DB" 2>/dev/null || echo 0)"
+    j ok true service "$st" health "$h" version "$(version)" since "$since" port "$PORT" db_bytes "$size"
+    ;;
+
+  logs)
+    n="${1:-50}"; [[ "$n" =~ ^[0-9]{1,3}$ ]] || fail "lines: Zahl 1–999"
+    journalctl -u "$SVC" -n "$n" --no-pager -o short-iso 2>&1 | python3 -c 'import json,sys; print(json.dumps({"ok":True,"lines":sys.stdin.read().splitlines()}, ensure_ascii=False))'
+    ;;
+
+  restart)
+    audit restart
+    systemctl restart "$SVC"
+    for i in $(seq 1 20); do health && break; sleep 0.5; done
+    health && j ok true message "Neu gestartet, App antwortet." || fail "Neu gestartet, aber die App antwortet nicht. Logs prüfen."
+    ;;
+
+  deploy)
+    sha="${1:-}"; [[ "$sha" =~ ^[0-9a-f]{64}$ ]] || fail "sha256: 64 Hex-Zeichen erwartet"
+    [[ -f "$INCOMING" ]] || fail "Kein hochgeladenes Paket vorhanden."
+    actual="$(sha256sum "$INCOMING" | awk '{print $1}')"
+    [[ "$actual" == "$sha" ]] || fail "Prüfsumme stimmt nicht (erwartet $sha, erhalten $actual)."
+    [[ -f "$APP/server.py" ]] || fail "Offenes Recht ist noch nicht installiert. Erstinstallation mit install.sh."
+    stage="$(mktemp -d "$OPS/stage.XXXX")"; trap 'rm -rf "$stage"' EXIT
+    # Archiv prüfen: nur erwartete Pfade, keine absoluten Pfade, keine Links
+    python3 - "$INCOMING" <<'PY' || fail "Paket enthält unerlaubte Einträge."
+import sys, tarfile, re
+ok = re.compile(r"^offenes-recht(/[A-Za-z0-9._-]+)*/?$")
+with tarfile.open(sys.argv[1]) as t:
+    for m in t.getmembers():
+        if not ok.match(m.name) or ".." in m.name.split("/") or not (m.isfile() or m.isdir()):
+            sys.exit(1)
+PY
+    tar xzf "$INCOMING" -C "$stage" --no-same-owner
+    P="$stage/offenes-recht"
+    for f in server.py seed.json static/index.html; do [[ -f "$P/$f" ]] || fail "Paket unvollständig: $f fehlt."; done
+    python3 -m py_compile "$P/server.py" 2>/dev/null || fail "server.py hat Syntaxfehler."
+    old="$(version)"; new="$(cat "$P/VERSION" 2>/dev/null || echo unbekannt)"
+    bkf="$(db_backup vor-deploy)"
+    rm -rf "$OPS/prev"; cp -a "$APP" "$OPS/prev"
+    install -m 0644 "$P/server.py" "$P/seed.json" "$APP/"
+    [[ -f "$P/VERSION" ]] && install -m 0644 "$P/VERSION" "$APP/"
+    install -m 0644 "$P/static/index.html" "$APP/static/"
+    audit "deploy $old -> $new sha=$sha"
+    systemctl restart "$SVC"
+    for i in $(seq 1 20); do health && break; sleep 0.5; done
+    if health; then
+      j ok true message "Version $new läuft (vorher $old)." db_backup "$bkf"
+    else
+      rm -rf "$APP"; cp -a "$OPS/prev" "$APP"; systemctl restart "$SVC"; sleep 1
+      audit "deploy rollback -> $old"
+      fail "Neue Version startet nicht. Version $old wiederhergestellt. Datenbank-Sicherung: $bkf"
+    fi
+    ;;
+
+  update)
+    # Paket aus einer GitHub-Release von cpramhofer/offenes-recht laden, Prüfsumme prüfen, dann wie deploy.
+    tag="${1:-}"; sha="${2:-}"
+    [[ "$tag" =~ ^v([0-9]{1,3}\.[0-9]{1,3}(\.[0-9]{1,3})?)$ ]] || fail "tag: Form v1.2 oder v1.2.3 erwartet"
+    ver="${BASH_REMATCH[1]}"
+    [[ "$sha" =~ ^[0-9a-f]{64}$ ]] || fail "sha256: 64 Hex-Zeichen erwartet"
+    # Quelle 1: GitHub-Release; Quelle 2: Zweig „pakete“ im selben Repository. Die Prüfsumme entscheidet.
+    part="$INCOMING.dl"; rm -f "$part"; url=""
+    for u in "https://github.com/$REPO/releases/download/$tag/offenes-recht-$ver.tgz" \
+             "https://raw.githubusercontent.com/$REPO/pakete/offenes-recht-$ver.tgz"; do
+      curl -fsSL --proto '=https' --max-filesize 5242880 -m 60 -o "$part" "$u" 2>/dev/null && { url="$u"; break; }
+    done
+    [[ -n "$url" ]] || { rm -f "$part"; fail "Paket $tag weder als Release noch im Zweig pakete gefunden."; }
+    actual="$(sha256sum "$part" | awk '{print $1}')"
+    [[ "$actual" == "$sha" ]] || { rm -f "$part"; fail "Prüfsumme stimmt nicht (erwartet $sha, erhalten $actual)."; }
+    mv -f "$part" "$INCOMING"
+    audit "update $tag geladen von $url sha=$sha"
+    exec "$0" deploy "$sha"
+    ;;
+
+  backup)
+    f="$(db_backup manuell)"; audit "backup $f"
+    [[ -n "$f" ]] && j ok true file "$(basename "$f")" || fail "Keine Datenbank vorhanden."
+    ;;
+
+  backups)
+    { ls -1t "$BK"/app-*.db 2>/dev/null || true; } | while read -r f; do printf '%s\t%s\t%s\n' "$(basename "$f")" "$(stat -c %s "$f")" "$(stat -c %y "$f" | cut -d. -f1)"; done |
+      python3 -c 'import json,sys; print(json.dumps({"ok":True,"backups":[dict(zip(("name","bytes","modified"),l.rstrip("\n").split("\t"))) for l in sys.stdin if l.strip()]}, ensure_ascii=False))'
+    ;;
+
+  restore)
+    name="${1:-}"; [[ "$name" =~ ^app-[0-9]{8}-[0-9]{6}-[a-z-]+\.db$ && -f "$BK/$name" ]] || fail "Unbekannte Sicherung."
+    cur="$(db_backup vor-restore)"
+    systemctl stop "$SVC"
+    rm -f "$DB-wal" "$DB-shm"
+    cp -a "$BK/$name" "$DB"; chown offenes-recht:offenes-recht "$DB"
+    systemctl start "$SVC"; audit "restore $name (vorher gesichert: $cur)"
+    for i in $(seq 1 20); do health && break; sleep 0.5; done
+    health && j ok true message "Sicherung $name eingespielt." previous "$(basename "$cur")" || fail "Eingespielt, aber die App antwortet nicht."
+    ;;
+
+  stats)
+    python3 - "$DB" <<'PY'
+import sqlite3, json, sys
+c = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
+q = lambda s: c.execute(s).fetchone()[0]
+print(json.dumps({"ok": True,
+  "konten": {r[0]+("/"+r[1] if r[1] != "active" else ""): r[2] for r in c.execute("SELECT role,status,COUNT(*) FROM users WHERE example=0 GROUP BY role,status")},
+  "gremium": q("SELECT COUNT(*) FROM users WHERE gremium=1"),
+  "bots_wartend": q("SELECT COUNT(*) FROM users WHERE role='bot' AND status='pending'"),
+  "beitraege": q("SELECT COUNT(*) FROM contributions WHERE example=0"),
+  "beitraege_beispiel": q("SELECT COUNT(*) FROM contributions WHERE example=1"),
+  "bewertungen": q("SELECT COUNT(*) FROM ratings"),
+  "paarvergleiche": q("SELECT COUNT(*) FROM pairwise")}, ensure_ascii=False))
+PY
+    ;;
+
+  gremium-add)
+    email="${1:-}"; [[ "$email" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]] || fail "Ungültige E-Mail-Adresse."
+    out="$(sudo -u offenes-recht python3 "$APP/server.py" gremium-add "$email" --db "$DB")"
+    audit "gremium-add $email: $out"
+    [[ "$out" == Gremiumsrecht* ]] && j ok true message "$out" || fail "$out"
+    ;;
+
+  *) fail "Unbekannte Aktion. Erlaubt: status, logs, restart, deploy, update, backup, backups, restore, stats, gremium-add." ;;
+esac
