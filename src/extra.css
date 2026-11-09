@@ -288,3 +288,11 @@ dialog.sharedlg .why{margin:10px 0 0}
 .pill.vote-n{background:var(--ink);color:var(--surface)}
 .konto td.num{text-align:right;white-space:nowrap}
 @media (max-width:760px){.konto .hero{grid-template-columns:repeat(2,minmax(0,1fr))}.konto .kgrid{grid-template-columns:1fr}}
+/* 1.8: Änderungsgesetze in der Suche */
+.actsbox{display:flex;flex-direction:column;gap:10px;margin:6px 0 12px}
+.actsbox .act{border:1px solid var(--rule);border-radius:8px;padding:12px 14px;background:var(--paper)}
+.actsbox .acttitle{margin:2px 0 4px}
+.actsbox p{margin:4px 0 8px}
+.actsbox .chips{display:flex;flex-wrap:wrap;gap:6px}
+.actsbox a.chip{text-decoration:none}
+.actsbox a.chip b{color:var(--accent)}

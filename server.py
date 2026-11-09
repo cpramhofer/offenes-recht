@@ -389,6 +389,7 @@ def ris_get(url, timeout=40):
 def ris_search(params):
     q = {"Applikation": "BrKons", "DokumenteProSeite": "OneHundred", "FassungVom": datetime.date.today().isoformat()}
     q.update(params)
+    if q["Applikation"] != "BrKons": q.pop("FassungVom", None)
     d = json.loads(ris_get(RIS_API + "?" + urllib.parse.urlencode(q)))
     r = d.get("OgdSearchResult", {})
     if "Error" in r: raise RuntimeError("RIS: %s" % r["Error"])
@@ -908,7 +909,7 @@ def need(cond, code, msg):
     if not cond: raise ApiError(code, msg)
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "OffenesRecht/1.7"
+    server_version = "OffenesRecht/1.8"
 
     def log_message(self, fmt, *a):
         # bewusst ohne IP-Adresse (Datenschutz); Fehlersuche über Pfad und Status
@@ -1558,7 +1559,7 @@ def r_norm(h):
 # mit API-Schlüssel (Authorization: Bearer …). REST und MCP verwenden dieselben Kernfunktionen.
 from urllib.parse import unquote
 
-APP_VERSION = "1.7"
+APP_VERSION = "1.8"
 READ_LIMIT_PER_MIN = int(os.environ.get("OR_API_READ_LIMIT", "120"))
 WRITE_LIMIT_PER_HOUR = int(os.environ.get("OR_API_WRITE_HOUR", "20"))
 WRITE_LIMIT_PER_DAY = int(os.environ.get("OR_API_WRITE_DAY", "100"))
@@ -2818,6 +2819,66 @@ def r_export(h):
             "protokoll": rows("SELECT action, target, note, created FROM audit WHERE actor=? OR (target=? AND action LIKE 'gremium:%')".replace("target=?", "target=" + str(uid)))}
     return data
 
+# ---------- Suche nach Änderungsgesetzen (Sammelgesetze) und Erwähnungen ----------
+# Viele Gesetze heißen nur im Bundesgesetzblatt so (z. B. „Nachhaltigkeitsberichtsgesetz“, BGBl. I Nr. 6/2026):
+# Es sind Sammelnovellen, die bestehende Gesetze ändern und eventuell neue erlassen. Im konsolidierten Recht gibt es
+# sie nicht als eigene Rechtsvorschrift. Diese Suche findet sie im BGBl und zeigt, welche Rechtsvorschriften sie betreffen.
+_acts_cache = {}
+_BGBL_Q = re.compile(r"(?:BGBl\.?\s*)?(I{1,3})?\s*(?:Nr\.?\s*)?(\d{1,4})\s*/\s*(\d{4})", re.I)
+
+def _laws_by_bgbl(c, bgbl):
+    m = re.search(r"Nr\.\s*(\d+)/(\d{4})", bgbl); teil = re.search(r"BGBl\.\s*(I{1,3})\s", bgbl)
+    if not m: return []
+    pat = re.compile(r"BGBl\.\s*" + (re.escape(teil.group(1)) + r"\s*" if teil else "") + r"Nr\.\s*" + m.group(1) + "/" + m.group(2) + r"(?!\d)")
+    like = f"%Nr. {m.group(1)}/{m.group(2)}%"
+    out = []
+    for r in c.execute("""SELECT gnr, kurztitel, abk, typ, aenderung, titel FROM laws WHERE tgroup!='me' AND (aenderung LIKE ? OR titel LIKE ?)""", (like, like)):
+        stf = re.search(r"StF:\s*([^·(]+)", r["titel"] or "")
+        new = bool(stf and pat.search(stf.group(1)))
+        if new or pat.search(r["aenderung"] or ""):
+            out.append({"gnr": r["gnr"], "name": r["kurztitel"], "abk": r["abk"], "new": new})
+    return sorted(out, key=lambda x: (not x["new"], x["name"]))
+
+def search_acts(q):
+    q = re.sub(r"\s+", " ", (q or "")).strip()
+    if len(q) < 4: return {"acts": [], "mentions": []}
+    hit = _acts_cache.get(q.lower())
+    if hit and time.time() - hit[0] < 3600: return hit[1]
+    c = db(); acts = []
+    m = _BGBL_Q.fullmatch(q)
+    if m and ("/" in q):
+        bg = f"BGBl. {m.group(1).upper() if m.group(1) else 'I'} Nr. {int(m.group(2))}/{m.group(3)}"
+        acts.append({"title": bg, "short": None, "bgbl": bg, "date": None, "laws": _laws_by_bgbl(c, bg)})
+    else:
+        try:
+            _, docs = ris_search({"Applikation": "BgblAuth", "Titel": q, "DokumenteProSeite": "Ten"})
+        except Exception: docs = []
+        for d in docs[:8]:
+            try:
+                b = d["Data"]["Metadaten"]["Bundesrecht"]; a = b.get("BgblAuth") or {}
+                bg = a.get("Bgblnummer")
+                if not bg: continue
+                acts.append({"title": b.get("Titel") or "", "short": b.get("Kurztitel"), "bgbl": bg, "date": a.get("Ausgabedatum"),
+                             "type": a.get("Typ"), "laws": _laws_by_bgbl(c, bg)})
+            except Exception: continue
+    mentions = []
+    if not m:
+        try:
+            _, docs = ris_search({"Suchworte": f'"{q}"', "DokumenteProSeite": "Twenty"})
+            seen = set()
+            for d in docs:
+                try: x = _meta(d)
+                except Exception: continue
+                if x["gnr"] in seen: continue
+                seen.add(x["gnr"]); mentions.append({"gnr": x["gnr"], "name": x["kurztitel"], "abk": x["abk"]})
+        except Exception: pass
+    known = {l["gnr"] for a in acts for l in a["laws"]}
+    res = {"acts": acts, "mentions": [x for x in mentions if x["gnr"] not in known][:12]}
+    _acts_cache[q.lower()] = (time.time(), res)
+    return res
+
+def r_acts(h): return search_acts(h.query.get("q", ""))
+
 # ---------- Reformpakete ----------
 PKG_MAX = 100
 def _pkg_items(c, pid):
@@ -2974,6 +3035,7 @@ ROUTES = {
     ("POST", "/api/package/update"): r_package_update, ("POST", "/api/package/add"): r_package_add, ("POST", "/api/package/rate"): r_package_rate,
     ("GET", "/api/draft"): r_draft, ("GET", "/api/drafts"): r_drafts,
     ("GET", "/api/gremium/anomalies"): r_g_anomalies, ("POST", "/api/gremium/hold"): r_g_hold,
+    ("GET", "/api/acts"): r_acts,
     ("GET", "/api/account/activity"): r_activity, ("POST", "/api/account/seen"): r_seen,
     ("POST", "/api/account/name"): r_rename, ("GET", "/api/account/export"): r_export,
     ("POST", "/api/follow"): r_follow, ("GET", "/api/follows"): r_follows, ("POST", "/api/account/notify"): r_notify, ("GET", "/api/references"): r_references, ("GET", "/api/zahlen"): r_zahlen,

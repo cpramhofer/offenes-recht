@@ -109,6 +109,27 @@ async function loadCatalog(reset){
   const qs = new URLSearchParams({q:c.q, g:c.g, idx:c.idx, sort:c.sort, offset:c.offset, limit:60});
   const j = await api("/api/catalog?"+qs);
   c.total = j.total; c.stats = j.stats; c.rows = reset ? j.rows : c.rows.concat(j.rows);
+  if (reset) loadActs(c.q);
+}
+async function loadActs(q){
+  S.acts = null;
+  if ((q||"").trim().length < 4) return;
+  const want = q;
+  try { const r = await api("/api/acts?q="+encodeURIComponent(q)); if (S.cat.q===want){ S.acts = r; const box = $("actsbox"); if (box) box.outerHTML = actsHtml(); } } catch(e){}
+}
+function actsHtml(){
+  const r = S.acts, q = S.cat.q;
+  if (!q || q.trim().length < 4) return `<div id="actsbox"></div>`;
+  if (!r) return `<div id="actsbox" class="actsbox"><span class="why">Suche auch im Bundesgesetzblatt und im Normtext …</span></div>`;
+  if (!r.acts.length && !r.mentions.length) return `<div id="actsbox"></div>`;
+  const chip = l => `<a class="chip" href="#/g/${l.gnr}" title="${esc(l.name)}">${esc(l.abk || l.name)}${l.new?" <b>neu</b>":""}</a>`;
+  return `<div id="actsbox" class="actsbox">
+    ${r.acts.filter(a => a.laws.length).map(a => `<div class="act"><div class="lbl">Änderungsgesetz im Bundesgesetzblatt</div>
+      <div class="acttitle"><b>${esc(a.short || a.bgbl)}</b> <span class="why">${esc(a.bgbl)}${a.date?", ausgegeben am "+fmtIso(a.date):""}</span></div>
+      <p class="why">Ein Sammelgesetz ist keine eigene Rechtsvorschrift: Es ändert bestehende Gesetze${a.laws.some(l => l.new)?" und erlässt neue":""}. Kommentiert wird dort, wo der Text heute steht. ${a.short?"Es":"Diese Kundmachung"} betrifft ${a.laws.length} ${a.laws.length===1?"Rechtsvorschrift":"Rechtsvorschriften"}:</p>
+      <div class="chips">${a.laws.map(chip).join("")}</div></div>`).join("")}
+    ${r.mentions.length ? `<div class="act"><div class="lbl">„${esc(q)}“ steht außerdem im Text von</div><div class="chips">${r.mentions.map(chip).join("")}</div></div>` : ""}
+  </div>`;
 }
 async function loadAll(){
   const [j, k] = await Promise.all([api("/api/state"), api("/api/packages").catch(() => ({packages:[], mine:{}}))]);
@@ -282,7 +303,7 @@ function renderHome(){
       <h1 id="h-laws">${syncing ? "Der Katalog wird aus dem RIS geladen …" : `${nf(st.laws)} Rechtsvorschriften. ${nf(st.norms)} Normen.`}</h1>
       <div class="gstats">${GROUPS.slice(1).map(([k,l]) => `<button class="gstat ${c.g===k?"on":""}" data-g="${k}" aria-pressed="${c.g===k}"><b>${nf(st.groups[k])}</b><span>${l}</span></button>`).join("")}</div>
       <div class="filters">
-        <input id="catq" type="search" placeholder="Suchen: Titel oder Abkürzung, z. B. ASVG, Mietrecht" value="${esc(c.q)}" aria-label="Rechtsvorschrift suchen">
+        <input id="catq" type="search" placeholder="Suchen: Titel, Abkürzung, Änderungsgesetz oder BGBl-Nummer" value="${esc(c.q)}" aria-label="Rechtsvorschrift suchen">
         <div class="seg" role="group" aria-label="Art">${GROUPS.map(([k,l]) => `<button data-g="${k}" aria-pressed="${c.g===k}">${l}</button>`).join("")}</div>
         <div class="selrow">
           <select id="catsort" aria-label="Sortierung"><option value="">A–Z</option><option value="contrib" ${c.sort==="contrib"?"selected":""}>Meiste Beiträge</option><option value="norms" ${c.sort==="norms"?"selected":""}>Meiste Normen</option><option value="new" ${c.sort==="new"?"selected":""}>Zuletzt in Kraft getreten</option><option value="changes" ${c.sort==="changes"?"selected":""}>Am häufigsten geändert</option><option value="old" ${c.sort==="old"?"selected":""}>Älteste Stammfassung</option><option value="eu" ${c.sort==="eu"?"selected":""}>Meiste EU-Bezüge</option></select>
@@ -291,6 +312,8 @@ function renderHome(){
       </div>
       ${filtering ? `
         <div class="listhead"><span class="why">${syncing ? "Bitte in einer Minute neu laden." : `${nf(c.total)} Treffer${c.idx?` im Sachgebiet ${esc(c.idx)}`:""}`}</span><button class="linkbtn" id="catreset">Zurücksetzen</button></div>
+        ${!c.total && c.q ? `<p class="why">Keine Rechtsvorschrift trägt „${esc(c.q)}“ im Titel oder in der Abkürzung.</p>` : ""}
+        ${actsHtml()}
         <ol class="laws">${c.rows.map(lawRow).join("")}</ol>
         ${c.rows.length < c.total ? `<div class="more"><button class="btn ghost" id="more">Weitere ${nf(Math.min(60, c.total-c.rows.length))} laden</button></div>` : ""}`
       : `
