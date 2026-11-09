@@ -4,6 +4,7 @@
 #   bash einrichten.sh                 Erstinstallation (fragt vor jedem Schritt mit Wirkung nach außen)
 #   bash einrichten.sh --zertifikat    nur HTTPS-Zertifikat holen (wenn DNS beim ersten Lauf noch nicht stimmte)
 #   bash einrichten.sh --datenbank IP  Datenbank vom alten Server übernehmen (vorher dort alt-umzug.sh ausführen)
+#   bash einrichten.sh --pruefen       Erreichbarkeit von Website und Betriebszugang prüfen
 #
 # Das Skript ist wiederholbar: Bereits Eingerichtetes wird erkannt und nicht doppelt angelegt.
 set -euo pipefail
@@ -38,6 +39,132 @@ dns_ok() {  # $1 = Name; stimmt der A-Eintrag mit diesem Server überein?
   [[ -n "$got" && "$got" == "$want" ]]
 }
 
+cert_has() {  # $1 = Name; enthält das Zertifikat diesen Namen?
+  local c="/etc/letsencrypt/live/$DOMAIN/fullchain.pem"
+  [[ -f "$c" ]] && openssl x509 -in "$c" -noout -ext subjectAltName 2>/dev/null | grep -q "DNS:$1\b"
+}
+
+proxy_locations() {
+  local token; token="$(cat /etc/or-ops-mcp/token 2>/dev/null || true)"
+  [[ -n "$token" ]] && cat <<EOF
+    # Betriebszugang für Claude: nur unter der geheimen Adresse erreichbar
+    location /$token/mcp {
+        proxy_pass http://127.0.0.1:8791;
+        proxy_set_header Host 127.0.0.1:8791;
+        proxy_http_version 1.1;
+        proxy_buffering off;
+        proxy_read_timeout 300s;
+    }
+EOF
+  cat <<EOF
+    location / {
+        proxy_pass http://127.0.0.1:$PORT;
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_read_timeout 120s;
+    }
+EOF
+}
+
+write_nginx() {  # schreibt die komplette Konfiguration für $DOMAIN (mit HTTPS, sobald ein Zertifikat da ist)
+  local f=/etc/nginx/sites-available/$DOMAIN bak="" live="/etc/letsencrypt/live/$DOMAIN"
+  [[ -f "$f" ]] && { bak="$f.bak-$(date +%Y%m%d-%H%M%S)"; cp -a "$f" "$bak"; }
+  {
+    echo "# Offenes Recht – $DOMAIN. Von einrichten.sh geschrieben; certbot ändert diese Datei nicht."
+    if cert_has "$DOMAIN"; then
+      cat <<EOF
+server {   # HTTP -> HTTPS (Zertifikatserneuerung über /.well-known/acme-challenge bleibt möglich)
+    listen 80;
+    listen [::]:80;
+    server_name $DOMAIN www.$DOMAIN;
+    location /.well-known/acme-challenge/ { root /var/www/html; }
+    location / { return 301 https://$DOMAIN\$request_uri; }
+}
+EOF
+      cert_has "www.$DOMAIN" && cat <<EOF
+server {   # www -> ohne www
+    listen 443 ssl;
+    listen [::]:443 ssl;
+    http2 on;
+    server_name www.$DOMAIN;
+    ssl_certificate $live/fullchain.pem;
+    ssl_certificate_key $live/privkey.pem;
+    return 301 https://$DOMAIN\$request_uri;
+}
+EOF
+      cat <<EOF
+server {
+    listen 443 ssl default_server;
+    listen [::]:443 ssl default_server;
+    http2 on;
+    server_name $DOMAIN;
+    ssl_certificate $live/fullchain.pem;
+    ssl_certificate_key $live/privkey.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_session_cache shared:or_ssl:10m;
+    add_header Strict-Transport-Security "max-age=31536000" always;
+    client_max_body_size 8m;
+    gzip on;
+    gzip_types text/css application/json application/javascript text/xml application/rss+xml;
+EOF
+    else
+      cat <<EOF
+server {
+    listen 80;
+    listen [::]:80;
+    server_name www.$DOMAIN;
+    location /.well-known/acme-challenge/ { root /var/www/html; }
+    location / { return 301 http://$DOMAIN\$request_uri; }
+}
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    server_name $DOMAIN;
+    location /.well-known/acme-challenge/ { root /var/www/html; }
+    client_max_body_size 8m;
+    gzip on;
+    gzip_types text/css application/json application/javascript text/xml application/rss+xml;
+EOF
+    fi
+    proxy_locations
+    echo "}"
+  } > "$f.new"
+  mv -f "$f.new" "$f"
+  mkdir -p /var/www/html
+  ln -sf "$f" /etc/nginx/sites-enabled/$DOMAIN
+  rm -f /etc/nginx/sites-enabled/default
+  # Reste, die certbot früher in andere Dateien geschrieben hat, stören nicht mehr: nur unsere Datei bedient $DOMAIN
+  if ! nginx -t >/dev/null 2>&1; then
+    # ältere nginx-Versionen kennen "http2 on;" nicht
+    sed -i 's/^    http2 on;$//; s/listen 443 ssl default_server;/listen 443 ssl http2 default_server;/; s/listen \[::\]:443 ssl default_server;/listen [::]:443 ssl http2 default_server;/' "$f"
+  fi
+  if ! nginx -t >/dev/null 2>&1; then
+    nginx -t || true; [[ -n "$bak" ]] && cp -a "$bak" "$f"; die "nginx-Konfiguration fehlerhaft, alte Fassung wiederhergestellt."
+  fi
+  systemctl enable --now nginx >/dev/null 2>&1; systemctl reload nginx
+}
+
+pruefen() {
+  say "Prüfung"
+  local t a b c d e
+  t="$(cat /etc/or-ops-mcp/token 2>/dev/null || true)"
+  a=$(curl -s -o /dev/null -w "%{http_code}" -m 15 "https://$DOMAIN/api/me" || true)
+  b=$(curl -s -o /dev/null -w "%{http_code} %{redirect_url}" -m 15 "http://$DOMAIN/" || true)
+  c=$(curl -s -o /dev/null -w "%{http_code} %{redirect_url}" -m 15 "https://www.$DOMAIN/" || true)
+  d=$(curl -s -o /dev/null -w "%{http_code}" -m 15 "https://$DOMAIN/.well-known/oauth-protected-resource" || true)
+  e=$(curl -s -o /dev/null -w "%{http_code}" -m 15 -X POST "https://$DOMAIN/$t/mcp" -H "Origin: https://claude.ai" \
+       -H "Content-Type: application/json" -H "Accept: application/json, text/event-stream" \
+       -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"test","version":"1"}}}' || true)
+  echo "   https://$DOMAIN            $a   (soll 200)"
+  echo "   http://$DOMAIN             $b   (soll 301 auf https://$DOMAIN/)"
+  echo "   https://www.$DOMAIN        $c   (soll 301 auf https://$DOMAIN/)"
+  echo "   OAuth-Erkennung            $d   (soll 404)"
+  echo "   Betriebszugang (Konnektor) $e   (soll 200)"
+  [[ "$a" == 200 && "$d" == 404 && "$e" == 200 ]] && ok "Alles in Ordnung." || warn "Noch nicht in Ordnung – bitte diese Ausgabe in den Chat kopieren."
+}
+
 zertifikat() {
   say "HTTPS-Zertifikat (Let's Encrypt)"
   local names=()
@@ -46,7 +173,17 @@ zertifikat() {
   if [[ ${#names[@]} -eq 0 ]]; then
     warn "Kein Zertifikat möglich. DNS-Einträge setzen, ein paar Minuten warten, dann: bash $0 --zertifikat"; return 0
   fi
-  certbot --nginx --non-interactive --agree-tos -m "$EMAIL" --redirect "${names[@]}" || die "certbot ist fehlgeschlagen (siehe oben)."
+  mkdir -p /var/www/html
+  write_nginx   # zuerst eine saubere Konfiguration, damit die Prüfung von Let's Encrypt über HTTP ankommt
+  certbot certonly --webroot -w /var/www/html --non-interactive --agree-tos -m "$EMAIL" \
+    --cert-name "$DOMAIN" --expand "${names[@]}" || die "certbot ist fehlgeschlagen (siehe oben)."
+  install_file /etc/letsencrypt/renewal-hooks/deploy/nginx-reload.sh 0755 <<'EOF'
+#!/bin/sh
+systemctl reload nginx
+EOF
+  # Erneuerung nur über webroot, ohne dass certbot die nginx-Konfiguration verändert
+  sed -i '/^installer *=/d; s/^authenticator *=.*/authenticator = webroot/' "/etc/letsencrypt/renewal/$DOMAIN.conf" 2>/dev/null || true
+  write_nginx
   sed -i "s#^OR_SECURE_COOKIE=.*#OR_SECURE_COOKIE=1#" "$ETC/app.env" 2>/dev/null || true
   systemctl restart offenes-recht
   ok "HTTPS aktiv: https://$DOMAIN (Erneuerung läuft automatisch über certbot.timer)"
@@ -78,7 +215,8 @@ PY
 }
 
 case "${1:-}" in
-  --zertifikat) zertifikat; exit 0 ;;
+  --zertifikat) zertifikat; pruefen; exit 0 ;;
+  --pruefen)    pruefen; exit 0 ;;
   --datenbank)  datenbank "${2:-}"; exit 0 ;;
   "") ;;
   *) die "Unbekannte Option: $1" ;;
@@ -97,7 +235,7 @@ ask "Weiter?" || exit 0
 say "1. Pakete"
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -qq
-apt-get install -y -qq python3 python3-venv nginx certbot python3-certbot-nginx sqlite3 curl ca-certificates openssh-client >/dev/null
+apt-get install -y -qq python3 python3-venv nginx certbot python3-certbot-nginx sqlite3 curl ca-certificates openssh-client openssl >/dev/null
 ok "$(python3 --version), nginx $(nginx -v 2>&1 | sed 's#.*/##')"
 
 say "2. Benutzer und Verzeichnisse"
@@ -563,48 +701,12 @@ systemctl enable --now or-ops-mcp >/dev/null 2>&1; systemctl restart or-ops-mcp;
 systemctl is-active --quiet or-ops-mcp && ok "MCP-Dienst läuft (127.0.0.1:8791)" || die "MCP-Dienst startet nicht: journalctl -u or-ops-mcp -n 50"
 
 say "7. Webserver"
-install_file /etc/nginx/sites-available/$DOMAIN 0644 <<EOF
-# Offenes Recht – $DOMAIN (certbot ergänzt den HTTPS-Teil)
-server {
-    listen 80;
-    listen [::]:80;
-    server_name www.$DOMAIN;
-    return 301 \$scheme://$DOMAIN\$request_uri;
-}
-server {
-    listen 80;
-    listen [::]:80;
-    server_name $DOMAIN;
-    client_max_body_size 8m;
-    gzip on;
-    gzip_types text/css application/json application/javascript text/xml application/rss+xml;
-
-    # Betriebszugang für Claude: nur unter der geheimen Adresse erreichbar
-    location /$TOKEN/mcp {
-        proxy_pass http://127.0.0.1:8791;
-        proxy_set_header Host 127.0.0.1:8791;
-        proxy_http_version 1.1;
-        proxy_buffering off;
-        proxy_read_timeout 300s;
-    }
-    location / {
-        proxy_pass http://127.0.0.1:$PORT;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_read_timeout 120s;
-    }
-}
-EOF
-ln -sf /etc/nginx/sites-available/$DOMAIN /etc/nginx/sites-enabled/$DOMAIN
-if [[ -e /etc/nginx/sites-enabled/default ]]; then rm -f /etc/nginx/sites-enabled/default; ok "Standardseite von nginx deaktiviert"; fi
-nginx -t 2>/dev/null || { nginx -t; die "nginx-Konfiguration fehlerhaft."; }
-systemctl enable --now nginx >/dev/null 2>&1; systemctl reload nginx
+write_nginx
 ok "nginx leitet $DOMAIN an Offenes Recht weiter"
 if command -v ufw >/dev/null && ufw status | grep -q "Status: active"; then ufw allow 'Nginx Full' >/dev/null; ufw allow OpenSSH >/dev/null; ok "Firewall: HTTP, HTTPS und SSH offen"; fi
 
 zertifikat
+pruefen
 
 say "Fertig"
 cat <<EOF
