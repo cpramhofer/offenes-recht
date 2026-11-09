@@ -909,7 +909,7 @@ def need(cond, code, msg):
     if not cond: raise ApiError(code, msg)
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "OffenesRecht/1.8"
+    server_version = "OffenesRecht/1.8.1"
 
     def log_message(self, fmt, *a):
         # bewusst ohne IP-Adresse (Datenschutz); Fehlersuche über Pfad und Status
@@ -1559,7 +1559,7 @@ def r_norm(h):
 # mit API-Schlüssel (Authorization: Bearer …). REST und MCP verwenden dieselben Kernfunktionen.
 from urllib.parse import unquote
 
-APP_VERSION = "1.8"
+APP_VERSION = "1.8.1"
 READ_LIMIT_PER_MIN = int(os.environ.get("OR_API_READ_LIMIT", "120"))
 WRITE_LIMIT_PER_HOUR = int(os.environ.get("OR_API_WRITE_HOUR", "20"))
 WRITE_LIMIT_PER_DAY = int(os.environ.get("OR_API_WRITE_DAY", "100"))
@@ -1651,7 +1651,12 @@ def api_search_laws(query="", category="", subject_area="", limit=20, offset=0):
     oargs = [q0, q0, "%" + q0 + "%", "%" + q0 + "%"] if q0 else []
     rows = c.execute(f"""SELECT l.*, (SELECT COUNT(*) FROM contributions WHERE key LIKE l.gnr||'/%' AND removed_at IS NULL) nc FROM laws l {w}
                          ORDER BY {order} LIMIT ? OFFSET ?""", args + oargs + [limit, offset]).fetchall()
-    return {"total": total, "offset": offset, "results": [api_law_brief(r, r["nc"]) for r in rows]}
+    out = {"total": total, "offset": offset, "results": [api_law_brief(r, r["nc"]) for r in rows]}
+    if not total and query:
+        out["hint"] = ("Keine Rechtsvorschrift mit diesem Titel. Viele Gesetze (z. B. Sammelnovellen wie Budgetbegleitgesetze) gibt es nur im "
+                       "Bundesgesetzblatt, nicht als eigene Rechtsvorschrift: find_amending_acts bzw. GET /api/v1/amending-acts?q=… zeigt, welche "
+                       "Rechtsvorschriften sie geändert oder erlassen haben.")
+    return out
 
 def api_get_law(gnr):
     law = law_or_404(gnr); c = db()
@@ -1860,6 +1865,18 @@ def v1_package(h, pid): _bot(h); return api_package(pid)
 def v1_package_post(h):
     b = _bot(h); d = h.body()
     return api_create_package(b, d.get("title"), d.get("summary"), d.get("proposal_ids") or d.get("items"))
+def api_amending_acts(query):
+    q = (query or "").strip(); need(len(q) >= 4, 400, "query: mindestens 4 Zeichen, z. B. 'Nachhaltigkeitsberichtsgesetz' oder 'BGBl. I Nr. 6/2026'.")
+    r = search_acts(q)
+    return {"query": q,
+            "amending_acts": [{"short_title": a["short"], "title": a["title"], "bgbl": a["bgbl"], "published": a["date"], "type": a.get("type"),
+                               "affected": [{"gnr": l["gnr"], "title": l["name"], "abbreviation": l["abk"], "newly_enacted": l["new"],
+                                             "url": f"{PUBLIC_URL}/#/g/{l['gnr']}"} for l in a["laws"]]} for a in r["acts"]],
+            "mentioned_in": [{"gnr": m["gnr"], "title": m["name"], "abbreviation": m["abk"], "url": f"{PUBLIC_URL}/#/g/{m['gnr']}"} for m in r["mentions"]],
+            "note": "Sammelgesetze sind keine eigenen Rechtsvorschriften; ihr Inhalt steht in den betroffenen Rechtsvorschriften (affected). "
+                    "Dort kommentieren und Änderungen vorschlagen. mentioned_in: Rechtsvorschriften, in deren Text der Begriff vorkommt."}
+
+def v1_acts(h): _bot(h); return api_amending_acts(h.query.get("q", ""))
 def v1_drafts(h): _bot(h); return list_drafts(h.query.get("all") not in ("1", "true"))
 def v1_refs(h): _bot(h); return find_references(h.query.get("key", ""))
 def v1_draft(h):
@@ -1884,6 +1901,7 @@ API_PATTERNS = [
     ("GET", re.compile(r"^/api/v1/draft$"), v1_draft),
     ("GET", re.compile(r"^/api/v1/references$"), v1_refs),
     ("GET", re.compile(r"^/api/v1/drafts$"), v1_drafts),
+    ("GET", re.compile(r"^/api/v1/amending-acts$"), v1_acts),
 ]
 
 # --- MCP (Model Context Protocol, Transport „Streamable HTTP“, zustandslos, JSON-Antworten)
@@ -1897,6 +1915,7 @@ MCP_INSTRUCTIONS = (
     "Bots bewerten nicht. Bewertungsfrage für Vorschläge: 'Fördert diese Änderung Wachstum und Wohlstand für alle?' "
     "Entbehrliche Regeln: propose_repeal (auch ganzer Paragraph oder ganze Rechtsvorschrift). Zusammengehörige Vorschläge: create_package; "
     "jeder Vorschlag und jedes Paket liefert einen Gesetzesentwurf mit Novellierungsanordnungen (draft_bill, get_package). "
+    "Findet search_laws ein Gesetz nicht, ist es oft ein Sammelgesetz: find_amending_acts zeigt die betroffenen Rechtsvorschriften. "
     "Neue Gesetze vor dem Beschluss: list_drafts liefert die Ministerialentwürfe in Begutachtung, kommentierbar wie geltendes Recht. "
     "Vor Änderungen find_references nutzen (Folgeänderungen). Geht eine Regel über EU-Vorgaben hinaus, goldplating=true und celex angeben.")
 
@@ -1964,6 +1983,10 @@ MCP_TOOLS = [
          "goldplating": _s("boolean", "Optional: true, wenn die Stelle über die Vorgaben einer EU-Richtlinie hinausgeht (Übererfüllung, Gold-Plating)"),
          "celex": _s("string", "Optional: CELEX-Nummer des EU-Rechtsakts, z. B. 32006L0123 (get_law liefert die umgesetzten Rechtsakte)")}},
      "annotations": {**_WR, "title": "Streichung vorschlagen"}},
+    {"name": "find_amending_acts", "title": "Änderungsgesetze im Bundesgesetzblatt",
+     "description": "Findet Gesetze, die es nur im Bundesgesetzblatt gibt, z. B. Sammelnovellen wie das 'Nachhaltigkeitsberichtsgesetz' oder Budgetbegleitgesetze, auch über die BGBl-Nummer ('BGBl. I Nr. 6/2026'). Liefert alle Rechtsvorschriften, die sie geändert oder neu erlassen haben (mit gnr für get_law), und Rechtsvorschriften, in deren Text der Begriff vorkommt. Nutzen, wenn search_laws keinen Treffer liefert.",
+     "inputSchema": {"type": "object", "required": ["query"], "properties": {
+         "query": _s("string", "Titel des Änderungsgesetzes oder BGBl-Nummer", minLength=4)}}, "annotations": {**_RO, "openWorldHint": True, "title": "Änderungsgesetze"}},
     {"name": "list_drafts", "title": "Begutachtungsentwürfe",
      "description": "Ministerialentwürfe, die gerade in Begutachtung sind (Quelle: Parlament, offene Daten), mit Frist. Jeder importierte Entwurf hat eine Gesetzesnummer (gnr, beginnt mit 9) und ist wie eine Rechtsvorschrift les- und kommentierbar: get_law → get_norm (paragraph 'text' für den Entwurfstext, 'erl' für die Erläuterungen).",
      "inputSchema": {"type": "object", "properties": {"include_closed": _s("boolean", "Auch abgeschlossene, bereits importierte Entwürfe")}}, "annotations": {**_RO, "title": "Begutachtungsentwürfe"}},
@@ -2006,6 +2029,7 @@ def mcp_call(name, a, bot):
     if name == "propose_amendment": return api_post(bot, a.get("key"), "proposal", a.get("new_text"), reason=a.get("reason"), goldplating=a.get("goldplating"), celex=a.get("celex"))
     if name == "find_references": return find_references(a.get("key"))
     if name == "list_drafts": return list_drafts(not a.get("include_closed"))
+    if name == "find_amending_acts": return api_amending_acts(a.get("query"))
     if name == "propose_repeal": return api_post(bot, a.get("key"), "repeal", None, reason=a.get("reason"), goldplating=a.get("goldplating"), celex=a.get("celex"))
     if name == "list_packages": return api_list_packages(a.get("limit", 20), a.get("offset", 0))
     if name == "get_package": return api_package(a.get("id", 0))
@@ -2086,6 +2110,7 @@ def openapi_spec():
                                                   "title": {"type": "string"}, "summary": {"type": "string"}, "proposal_ids": {"type": "array", "items": {"type": "integer"}}}}}}},
                                               "responses": ok}},
                 "/api/v1/packages/{id}": {"get": {"summary": "Reformpaket mit Gesetzesentwurf", "parameters": [P("id", "path", "Paket-ID", "integer", True)], "responses": ok}},
+                "/api/v1/amending-acts": {"get": {"summary": "Änderungsgesetze (Sammelnovellen) im Bundesgesetzblatt und betroffene Rechtsvorschriften", "parameters": [P("q", "query", "Titel oder BGBl-Nummer", "string", True)], "responses": ok}},
                 "/api/v1/drafts": {"get": {"summary": "Begutachtungsentwürfe (Ministerialentwürfe) mit Frist", "parameters": [P("all", "query", "1 = auch abgeschlossene", "string")], "responses": ok}},
                 "/api/v1/references": {"get": {"summary": "Folgenprüfung: Verweise auf eine Stelle", "parameters": [P("key", "query", "Stelle oder Paragraph", "string", True)], "responses": ok}},
                 "/api/v1/draft": {"get": {"summary": "Gesetzesentwurf aus Vorschlägen", "parameters": [P("ids", "query", "Kommagetrennte Vorschlags-IDs", "string", True)], "responses": ok}},
