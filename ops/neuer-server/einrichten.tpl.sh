@@ -11,7 +11,7 @@ umask 022
 
 DOMAIN="${DOMAIN:-offenesrecht.at}"
 EMAIL="${EMAIL:-christoph.pramhofer@neos.eu}"          # nur für Let's Encrypt (Ablaufwarnungen)
-VERSION="@@VERSION@@"
+OR_VERSION="@@VERSION@@"
 PKG_SHA="@@SHA@@"
 REPO="cpramhofer/offenes-recht"
 APP=/opt/offenes-recht
@@ -28,8 +28,9 @@ die()  { printf '\n\033[31mFehler: %s\033[0m\n' "$*"; exit 1; }
 install_file() { local t="$1" m="$2"; mkdir -p "$(dirname "$t")"; cat > "$t.tmp"; chmod "$m" "$t.tmp"; mv -f "$t.tmp" "$t"; }
 
 [[ $EUID -eq 0 ]] || die "Bitte als root ausführen."
-. /etc/os-release 2>/dev/null || true
-[[ "${ID:-}${ID_LIKE:-}" =~ (debian|ubuntu) ]] || die "Nur für Ubuntu oder Debian gedacht (gefunden: ${PRETTY_NAME:-unbekannt})."
+OS_ID="$(. /etc/os-release 2>/dev/null; echo "${ID:-} ${ID_LIKE:-}")"
+OS_NAME="$(. /etc/os-release 2>/dev/null; echo "${PRETTY_NAME:-unbekannt}")"
+[[ "$OS_ID" =~ (debian|ubuntu) ]] || die "Nur für Ubuntu oder Debian gedacht (gefunden: $OS_NAME)."
 
 public_ip() { curl -4 -fsS -m 8 https://api.ipify.org 2>/dev/null || hostname -I | awk '{print $1}'; }
 dns_ok() {  # $1 = Name; stimmt der A-Eintrag mit diesem Server überein?
@@ -85,9 +86,9 @@ esac
 
 cat <<EOF
 
-Offenes Recht – Einrichtung auf $(hostname) ($(public_ip)), ${PRETTY_NAME:-}
+Offenes Recht – Einrichtung auf $(hostname) ($(public_ip)), $OS_NAME
   Domain:      $DOMAIN (und www.$DOMAIN)
-  Version:     $VERSION aus github.com/$REPO (Prüfsumme wird kontrolliert)
+  Version:     $OR_VERSION aus github.com/$REPO (Prüfsumme wird kontrolliert)
   Installiert: python3, nginx, certbot, sqlite3 · Dienste offenes-recht, or-ops, or-ops-mcp
   Daten:       $DATA · Einstellungen $ETC
 EOF
@@ -110,9 +111,9 @@ install -d -o orops -g orops -m 0750 "$OPSDATA/incoming"
 chmod 0711 "$OPSDATA"
 ok "offenes-recht (App), orops (Betriebszugang)"
 
-say "3. Offenes Recht $VERSION"
+say "3. Offenes Recht $OR_VERSION"
 tmp="$(mktemp -d)"
-curl -fsSL -m 60 -o "$tmp/p.tgz" "https://raw.githubusercontent.com/$REPO/pakete/offenes-recht-$VERSION.tgz" || die "Download fehlgeschlagen."
+curl -fsSL -m 60 -o "$tmp/p.tgz" "https://raw.githubusercontent.com/$REPO/pakete/offenes-recht-$OR_VERSION.tgz" || die "Download fehlgeschlagen."
 echo "$PKG_SHA  $tmp/p.tgz" | sha256sum -c --quiet - || die "Prüfsumme stimmt nicht – Abbruch."
 tar -xzf "$tmp/p.tgz" -C "$tmp"
 install -m 0644 "$tmp/offenes-recht/server.py" "$tmp/offenes-recht/seed.json" "$tmp/offenes-recht/VERSION" "$APP/"
