@@ -3005,7 +3005,8 @@ def scheduler():
         try:
             c = db()
             last = c.execute("SELECT v FROM meta WHERE k='drafts_synced'").fetchone()
-            if not last or now() - int(last[0]) > 6 * 3600: sync_drafts()
+            unstaged = c.execute("SELECT 1 FROM drafts WHERE active=0 AND stage IS NULL AND frist>=date('now','-365 day') LIMIT 1").fetchone()
+            if not last or now() - int(last[0]) > 6 * 3600 or unstaged: sync_drafts()
         except Exception as e: sys.stderr.write("Entwürfe: %r\n" % e)
         try:
             if 7 <= time.localtime().tm_hour < 22: send_digests()
