@@ -147,6 +147,10 @@ def init_db(seed=True):
     if "stance" not in cols:                                             # Debatte: Richtung, Kategorie, Streitfrage, Quelle
         for col in ("stance TEXT", "category TEXT", "issue TEXT", "question TEXT", "summary TEXT", "src_org TEXT", "src_ref TEXT", "src_url TEXT"):
             c.execute("ALTER TABLE contributions ADD COLUMN " + col)
+    dcols = [r[1] for r in c.execute("PRAGMA table_info(drafts)")]
+    if "stage" not in dcols:                                             # Stand des Gesetzgebungsverfahrens nach der Begutachtung
+        for col in ("stage TEXT", "stage_note TEXT", "rv TEXT", "rv_url TEXT", "bgbl TEXT", "inkraft TEXT", "stage_checked INTEGER"):
+            c.execute("ALTER TABLE drafts ADD COLUMN " + col)
     ncols = [r[1] for r in c.execute("PRAGMA table_info(norms)")]
     if "kundmachung" not in ncols:
         c.execute("ALTER TABLE norms ADD COLUMN kundmachung TEXT")
@@ -916,7 +920,7 @@ def need(cond, code, msg):
     if not cond: raise ApiError(code, msg)
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "OffenesRecht/1.11.2"
+    server_version = "OffenesRecht/1.12"
 
     def log_message(self, fmt, *a):
         # bewusst ohne IP-Adresse (Datenschutz); Fehlersuche über Pfad und Status
@@ -1583,7 +1587,7 @@ def r_norm(h):
 # mit API-Schlüssel (Authorization: Bearer …). REST und MCP verwenden dieselben Kernfunktionen.
 from urllib.parse import unquote
 
-APP_VERSION = "1.11.2"
+APP_VERSION = "1.12"
 READ_LIMIT_PER_MIN = int(os.environ.get("OR_API_READ_LIMIT", "120"))
 WRITE_LIMIT_PER_HOUR = int(os.environ.get("OR_API_WRITE_HOUR", "20"))
 WRITE_LIMIT_PER_DAY = int(os.environ.get("OR_API_WRITE_DAY", "100"))
@@ -2358,7 +2362,7 @@ MCP_TOOLS = [
      "inputSchema": {"type": "object", "required": ["query"], "properties": {
          "query": _s("string", "Titel des Änderungsgesetzes oder BGBl-Nummer", minLength=4)}}, "annotations": {**_RO, "openWorldHint": True, "title": "Änderungsgesetze"}},
     {"name": "list_drafts", "title": "Begutachtungsentwürfe",
-     "description": "Ministerialentwürfe, die gerade in Begutachtung sind (Quelle: Parlament, offene Daten), mit Frist. Jeder importierte Entwurf hat eine Gesetzesnummer (gnr, beginnt mit 9) und ist wie eine Rechtsvorschrift les- und kommentierbar: get_law → get_norm (paragraph 'text' für den Entwurfstext, 'erl' für die Erläuterungen).",
+     "description": "Ministerialentwürfe in Begutachtung sowie abgeschlossene Begutachtungen, deren Gesetz noch nicht in Kraft ist (Quelle: Parlament und RIS), mit Frist und Stand (stage: begutachtung, regierung = noch keine Regierungsvorlage, parlament, kundgemacht = Inkrafttreten in_force_from steht bevor). Jeder importierte Entwurf hat eine Gesetzesnummer (gnr, beginnt mit 9) und ist wie eine Rechtsvorschrift les- und kommentierbar: get_law → get_norm (paragraph 'text' für den Entwurfstext, 'erl' für die Erläuterungen).",
      "inputSchema": {"type": "object", "properties": {"include_closed": _s("boolean", "Auch abgeschlossene, bereits importierte Entwürfe")}}, "annotations": {**_RO, "title": "Begutachtungsentwürfe"}},
     {"name": "find_references", "title": "Folgenprüfung: Verweise auf eine Stelle",
      "description": "Findet Stellen, die auf einen Paragraphen oder Absatz verweisen: im selben Gesetz (Normtext) und in anderen Rechtsvorschriften (RIS-Volltextsuche). Vor Änderungs- oder Streichungsvorschlägen nutzen, um Folgeänderungen zu erkennen; gefundene Probleme als Kommentar an der betroffenen Stelle melden.",
@@ -2748,6 +2752,62 @@ def import_draft(c, row):
     c.execute("UPDATE laws SET n_norms=? WHERE gnr=?", (n, gnr)); c.commit()
     return True
 
+DRAFT_FOLLOW_DAYS = 365          # abgeschlossene Begutachtungen so lange weiterverfolgen
+STAGES = {"begutachtung": "In Begutachtung", "regierung": "Begutachtung abgeschlossen, noch keine Regierungsvorlage",
+          "parlament": "Im Parlament", "kundgemacht": "Kundgemacht, noch nicht in Kraft", "inkraft": "In Kraft"}
+
+def draft_stage(gp, inr):
+    """Weg nach der Begutachtung: Ministerialentwurf → Regierungsvorlage → Bundesgesetzblatt → Inkrafttreten (RIS)."""
+    me = json.loads(_parl_get(f"/gegenstand/{gp}/ME/{inr}?json=TRUE"))["content"]
+    rv = None
+    for st in me.get("stages") or []:
+        m = re.search(r'href="(/gegenstand/[^"]+/I/\d+)"[^>]*>([^<]+)<', st.get("text") or "")
+        if m: rv = (m.group(1), m.group(2).strip())
+    if not rv: return {"stage": "regierung", "stage_note": None, "rv": None, "rv_url": None, "bgbl": None, "inkraft": None}
+    time.sleep(0.5)
+    c = json.loads(_parl_get(rv[0] + "?json=TRUE"))["content"]; st = c.get("status") or {}
+    desc = re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", st.get("description") or "")).strip()
+    desc = re.split(r"\s*,?\s*Dafür:", desc)[0].strip()
+    bg = []
+    for l in st.get("bgbllinks") or []:
+        m = re.search(r"BGBLA_(\d{4})_I_(\d+)", l.get("link") or "")
+        if m: bg.append(f"{m.group(2)}/{m.group(1)}")
+    out = {"stage": "parlament", "stage_note": desc[:200] or None, "rv": rv[1], "rv_url": PARL + rv[0], "bgbl": ", ".join(bg) or None, "inkraft": None}
+    if not bg: return out
+    # Inkrafttreten der geänderten Normen: je Norm die späteste Fassung aus dieser Novelle; überwiegend in der Zukunft = noch nicht in Kraft
+    today = datetime.date.today().isoformat(); per = {}
+    for b in bg:
+        time.sleep(0.5)
+        d = json.loads(ris_get(RIS_API + "?" + urllib.parse.urlencode({"Applikation": "BrKons", "Kundmachungsorgan": "BGBl. I Nr.",
+                                                                    "Kundmachungsorgannummer": b, "DokumenteProSeite": "OneHundred"})))
+        refs = d["OgdSearchResult"].get("OgdDocumentResults", {}).get("OgdDocumentReference", [])
+        for x in (refs if isinstance(refs, list) else [refs]):
+            k = x["Data"]["Metadaten"]["Bundesrecht"].get("BrKons", {}); ik = k.get("Inkrafttretensdatum") or ""
+            if k.get("NovellenBgblnummer") != b or not ik or ik >= "9000": continue
+            key = (k.get("Gesetzesnummer"), k.get("ArtikelParagraphAnlage")); per[key] = max(per.get(key, ""), ik)
+    fut = sorted(v for v in per.values() if v > today)
+    if per and len(fut) * 2 >= len(per):
+        out.update(stage="kundgemacht", inkraft=max(set(fut), key=fut.count))
+    else: out.update(stage="inkraft")
+    return out
+
+def sync_draft_stages(c, limit=60):
+    """Abgeschlossene Begutachtungen der letzten 12 Monate: Stand nachführen (Endzustand „in Kraft“ wird nicht mehr abgefragt)."""
+    since = (datetime.date.today() - datetime.timedelta(days=DRAFT_FOLLOW_DAYS)).isoformat(); n = 0
+    rows = c.execute("""SELECT * FROM drafts WHERE active=0 AND frist>=? AND COALESCE(stage,'')!='inkraft'
+                        AND COALESCE(stage_checked,0)<? ORDER BY COALESCE(stage_checked,0), frist DESC LIMIT ?""", (since, now() - 20 * 3600, limit)).fetchall()
+    for r in rows:
+        try: st = draft_stage(r["gp"], r["inr"])
+        except Exception as e:
+            sys.stderr.write("Stand %s: %r\n" % (r["gnr"], e)); continue
+        c.execute("UPDATE drafts SET stage=?,stage_note=?,rv=?,rv_url=?,bgbl=?,inkraft=?,stage_checked=? WHERE gnr=?",
+                  (st["stage"], st["stage_note"], st["rv"], st["rv_url"], st["bgbl"], st["inkraft"], now(), r["gnr"]))
+        if st["stage"] != "inkraft" and not c.execute("SELECT 1 FROM norms WHERE gnr=? LIMIT 1", (r["gnr"],)).fetchone():
+            try: import_draft(c, dict(r))
+            except Exception as e: sys.stderr.write("Entwurf %s: %r\n" % (r["gnr"], e))
+        c.commit(); n += 1; time.sleep(1)
+    return n
+
 def sync_drafts():
     """Liste der Ministerialentwürfe der laufenden Gesetzgebungsperiode; laufende Begutachtungen importieren."""
     c = sqlite3.connect(DB_PATH, timeout=30); c.row_factory = sqlite3.Row
@@ -2769,20 +2829,28 @@ def sync_drafts():
                 if import_draft(c, row): new += 1
             except Exception as e: sys.stderr.write("Entwurf %s: %r\n" % (gnr, e))
             time.sleep(1)
+    c.execute("UPDATE drafts SET stage='begutachtung' WHERE active=1"); c.commit()
+    try: st = sync_draft_stages(c)
+    except Exception as e: st = 0; sys.stderr.write("Stand der Entwürfe: %r\n" % e)
     c.execute("INSERT OR REPLACE INTO meta VALUES('drafts_synced',?)", (str(now()),)); c.commit(); c.close()
-    sys.stderr.write(f"Begutachtungsentwürfe: {new} neu importiert\n")
+    sys.stderr.write(f"Begutachtungsentwürfe: {new} neu importiert, {st} abgeschlossene nachgeführt\n")
 
 def draft_view(c, r):
     nc = c.execute("SELECT COUNT(*) FROM contributions WHERE key LIKE ? AND removed_at IS NULL", (r["gnr"] + "/%",)).fetchone()[0]
     imported = bool(c.execute("SELECT 1 FROM norms WHERE gnr=? LIMIT 1", (r["gnr"],)).fetchone())
     return {"gnr": r["gnr"], "nr": f"{r['inr']}/ME", "gp": r["gp"], "title": r["title"], "ressort": r["ressort"], "ministry": r["ministry"],
             "deadline": r["frist"], "received": r["einlangen"], "active": bool(r["active"]), "statements_parliament": r["statements"],
-            "parliament_url": r["url"], "contributions": nc, "commentable": imported, "url": f"{PUBLIC_URL}/#/g/{r['gnr']}" if imported else None}
+            "parliament_url": r["url"], "contributions": nc, "commentable": imported, "url": f"{PUBLIC_URL}/#/g/{r['gnr']}" if imported else None,
+            "stage": r["stage"] or ("begutachtung" if r["active"] else None), "stage_label": STAGES.get(r["stage"] or ("begutachtung" if r["active"] else ""), None),
+            "stage_note": r["stage_note"], "government_bill": r["rv"], "government_bill_url": r["rv_url"], "bgbl": r["bgbl"], "in_force_from": r["inkraft"]}
 
 def list_drafts(active_only=True):
-    c = db()
-    rows = c.execute("SELECT * FROM drafts" + (" WHERE active=1" if active_only else "") + " ORDER BY frist" + ("" if active_only else " DESC")).fetchall()
-    out = [draft_view(c, r) for r in rows if r["active"] or c.execute("SELECT 1 FROM norms WHERE gnr=? LIMIT 1", (r["gnr"],)).fetchone()]
+    """active_only: laufende Begutachtungen und abgeschlossene, deren Gesetz noch nicht in Kraft ist."""
+    c = db(); since = (datetime.date.today() - datetime.timedelta(days=DRAFT_FOLLOW_DAYS)).isoformat()
+    rows = c.execute("SELECT * FROM drafts" + (" WHERE active=1 OR (frist>=? AND stage IN ('regierung','parlament','kundgemacht'))" if active_only else "")
+                     + " ORDER BY active DESC, frist" + ("" if active_only else " DESC"), (since,) if active_only else ()).fetchall()
+    out = [draft_view(c, r) for r in rows if r["active"] or (active_only and r["stage"] in ("regierung", "parlament", "kundgemacht"))
+           or c.execute("SELECT 1 FROM norms WHERE gnr=? LIMIT 1", (r["gnr"],)).fetchone()]
     return {"drafts": out,
             "synced": int((c.execute("SELECT v FROM meta WHERE k='drafts_synced'").fetchone() or [0])[0])}
 

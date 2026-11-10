@@ -280,12 +280,24 @@ function propCard(c){
     <div class="why">${esc(who)}</div>
   </article>`;
 }
+function stagePill(d){
+  if (d.stage==="regierung") return `<span class="pill st-reg">bei der Regierung</span>`;
+  if (d.stage==="parlament") return `<span class="pill st-parl">im Parlament</span>`;
+  if (d.stage==="kundgemacht") return `<span class="pill st-kund">in Kraft ab ${fmtIso(d.in_force_from)}</span>`;
+  return "";
+}
+function stageLine(d){
+  if (d.stage==="regierung") return `Begutachtung bis ${fmtIso(d.deadline)} abgeschlossen · noch keine Regierungsvorlage`;
+  if (d.stage==="parlament") return `Regierungsvorlage ${d.government_bill_url?`<a href="${esc(d.government_bill_url)}" target="_blank" rel="noopener">${esc(d.government_bill)}</a>`:esc(d.government_bill||"")}${d.stage_note?` · ${esc(d.stage_note)}`:""}`;
+  if (d.stage==="kundgemacht") return `Kundgemacht in BGBl. I Nr. ${esc(d.bgbl||"")} · tritt überwiegend am ${fmtIso(d.in_force_from)} in Kraft`;
+  return "";
+}
 function draftCard(d){
-  const left = daysLeft(d.deadline);
+  const left = daysLeft(d.deadline), open = d.active;
   return `<article class="pcard drcard">
-    <div class="chead"><span class="pill pkg">${esc(d.nr)}</span><span class="vfy">${esc(d.ressort||"")}</span>${left!==null?`<span class="pill ${left<=3?"s-umstritten":"s-diskutiert"}">${left<0?"Frist abgelaufen":left===0?"Frist endet heute":`noch ${left} ${left===1?"Tag":"Tage"}`}</span>`:""}</div>
+    <div class="chead"><span class="pill pkg">${esc(d.nr)}</span><span class="vfy">${esc(d.ressort||"")}</span>${open ? (left!==null?`<span class="pill ${left<=3?"s-umstritten":"s-diskutiert"}">${left<0?"Frist abgelaufen":left===0?"Frist endet heute":`noch ${left} ${left===1?"Tag":"Tage"}`}</span>`:"") : stagePill(d)}</div>
     <a class="paddr" href="${d.url ? "#/g/"+d.gnr : esc(d.parliament_url)}">${esc(d.title)}</a>
-    <div class="why">Begutachtung bis ${fmtIso(d.deadline)} · ${esc(d.ministry||"")}</div>
+    <div class="why">${open ? `Begutachtung bis ${fmtIso(d.deadline)} · ${esc(d.ministry||"")}` : stageLine(d)}</div>
     <div class="why">${d.contributions ? `${d.contributions} ${d.contributions===1?"Beitrag":"Beiträge"} hier` : "Noch keine Beiträge hier"} · ${d.statements_parliament} Stellungnahmen beim Parlament</div>
     ${d.url ? `<div class="row">${d.contributions ? `<a class="btn" href="#/debatte/${d.gnr}">Debatte ansehen</a>` : ""}<a class="btn ghost" href="#/g/${d.gnr}">Entwurf lesen</a></div>` : ""}
   </article>`;
@@ -360,9 +372,16 @@ function renderHome(){
   </div>
   ${(S.drafts||[]).length ? `<section class="hprops" id="home-drafts" aria-labelledby="h-drafts">
     <div class="hprops-head"><h2 id="h-drafts">Neues Recht in Begutachtung</h2>
-      <span class="why">${S.drafts.length} Gesetzesentwürfe der Ministerien. Bis zum Ende der Frist kann jede und jeder Stellung nehmen, hier Absatz für Absatz. Die Debatte zeigt, wer welche Position vertritt.</span></div>
-    <div class="pgrid">${S.drafts.slice(0, S.draftsAll ? 99 : 6).map(draftCard).join("")}</div>
-    ${S.drafts.length > 6 && !S.draftsAll ? `<button class="linkbtn strong" id="draftsall">Alle ${S.drafts.length} Entwürfe</button>` : ""}
+      <span class="why">${(n => `${n} ${n===1?"Gesetzesentwurf":"Gesetzesentwürfe"} der Ministerien in Begutachtung.`)(S.drafts.filter(d => d.active).length)} Bis zum Ende der Frist kann jede und jeder Stellung nehmen, hier Absatz für Absatz. Die Debatte zeigt, wer welche Position vertritt.</span></div>
+    ${(() => { const act = S.drafts.filter(d => d.active), done = S.drafts.filter(d => !d.active);
+      return `${act.length ? `<div class="pgrid">${act.slice(0, S.draftsAll ? 99 : 6).map(draftCard).join("")}</div>
+        ${act.length > 6 && !S.draftsAll ? `<button class="linkbtn strong" id="draftsall">Alle ${act.length} laufenden Begutachtungen</button>` : ""}` : `<div class="empty">Gerade läuft keine Begutachtung.</div>`}
+      ${done.length ? `<h3 class="drsub" id="h-drafts-done">Begutachtung abgeschlossen, noch nicht in Kraft <span class="why">${done.length}</span></h3>
+        <p class="why drsubp">Die Begutachtung ist vorbei, das Gesetz gilt aber noch nicht: bei der Regierung, im Parlament oder kundgemacht mit späterem Inkrafttreten. Kommentare und Vorschläge sind weiter möglich.</p>
+        <div class="seg drseg" role="group" aria-label="Stand">${[["","Alle"],["regierung","Bei der Regierung"],["parlament","Im Parlament"],["kundgemacht","Kundgemacht"]].map(([k,l]) => `<button data-drstage="${k}" aria-pressed="${(S.drStage||"")===k}">${l} (${k ? done.filter(d => d.stage===k).length : done.length})</button>`).join("")}</div>
+        ${(() => { const sel = done.filter(d => !S.drStage || d.stage===S.drStage).sort((a,b) => (b.contributions - a.contributions) || String(b.deadline).localeCompare(String(a.deadline)));
+          return `<div class="pgrid">${sel.slice(0, S.draftsDoneAll ? 999 : 6).map(draftCard).join("")}</div>
+          ${sel.length > 6 && !S.draftsDoneAll ? `<button class="linkbtn strong" id="draftsdoneall">Alle ${sel.length} anzeigen</button>` : ""}`; })()}` : ""}`; })()}
   </section>` : ""}
   <section class="hprops" id="home-props" aria-labelledby="h-props">
     <div class="hprops-head">
@@ -393,7 +412,7 @@ function renderToc(){
   const dr = S.law.draft;
   $("toc").innerHTML = `<div class="lbl">${isDraftLaw() ? `Ministerialentwurf ${esc(S.law.abk)}` : `${esc(S.law.typ)} · Gesetzesnummer ${S.law.gnr}`}</div>
     <div class="tochead">${esc(S.law.kurztitel)}</div>
-    ${isDraftLaw() ? (dr ? `<div class="lawmeta why">${esc(dr.ministry||"")} · Begutachtung bis <b>${fmtIso(dr.deadline)}</b>${(() => { const l = daysLeft(dr.deadline); return l!==null && l>=0 ? ` (noch ${l} ${l===1?"Tag":"Tage"})` : " (abgelaufen)"; })()} · <a href="${esc(dr.parliament_url)}" target="_blank" rel="noopener">beim Parlament</a></div>` : "") : lawMetaHtml(S.law)}
+    ${isDraftLaw() ? (dr ? `<div class="lawmeta why">${esc(dr.ministry||"")} · Begutachtung bis <b>${fmtIso(dr.deadline)}</b>${(() => { const l = daysLeft(dr.deadline); return l!==null && l>=0 ? ` (noch ${l} ${l===1?"Tag":"Tage"})` : " (abgeschlossen)"; })()} · <a href="${esc(dr.parliament_url)}" target="_blank" rel="noopener">beim Parlament</a>${!dr.active && dr.stage ? `<br>${stagePill(dr)} ${stageLine(dr)}` : ""}</div>` : "") : lawMetaHtml(S.law)}
     <div class="followrow">${followBtn("law", S.law.gnr, "btn ghost")}${shareBtn("/e/"+S.law.gnr)}<a class="linkbtn subtle" href="/feed/gesetz/${S.law.gnr}.xml" target="_blank" rel="noopener" title="RSS-Feed der Beiträge">RSS</a></div>
     <input id="tocq" type="search" placeholder="§ oder Stichwort" value="${esc(S.tocq)}" aria-label="Im Inhaltsverzeichnis suchen">
     <div class="why">${nf(S.norms.length)} Normen${loading?` · Überschriften werden geladen (${nf(loading)} offen)`:""}</div>
@@ -1248,7 +1267,7 @@ function renderPage(){
       ["GET","/api/v1/proposals/top?gnr=","Top-Vorschläge",""],
       ["POST","/api/v1/contributions","Kommentar, Vorschlag oder Streichung (type: repeal) veröffentlichen","ja"],
       ["GET","/api/v1/amending-acts?q=","Änderungsgesetze im Bundesgesetzblatt und betroffene Rechtsvorschriften",""],
-      ["GET","/api/v1/drafts","Begutachtungsentwürfe in Begutachtung",""],
+      ["GET","/api/v1/drafts","Begutachtungsentwürfe: laufend und abgeschlossen, aber noch nicht in Kraft (mit Stand)",""],
       ["GET","/api/v1/references?key=","Folgenprüfung: Verweise auf eine Stelle",""],
       ["GET","/api/v1/packages","Reformpakete",""],
       ["GET","/api/v1/packages/{id}","Reformpaket mit Gesetzesentwurf",""],
@@ -1507,6 +1526,8 @@ document.addEventListener("click", e => {
 });
 document.addEventListener("click", async e => {
   const t = e.target.closest("button, .unit, [data-goto]");
+  if (t && t.dataset.drstage !== undefined && t.closest(".drseg")){ S.drStage = t.dataset.drstage; S.draftsDoneAll = false; render(); return; }
+  if (t && t.id==="draftsdoneall"){ S.draftsDoneAll = true; render(); return; }
   if (t && t.dataset.debtab){ S.debTab = t.dataset.debtab; renderPage(); return; }
   if (t && t.dataset.debgo){ debGo(t.dataset.debgo); return; }
   if (t && t.dataset.debtoggle){ const id = t.dataset.debtoggle; S.debOpen = S.debOpen || new Set(); S.debOpen.has(id) ? S.debOpen.delete(id) : S.debOpen.add(id); renderPage(); return; }

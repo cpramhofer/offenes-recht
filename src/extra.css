@@ -401,3 +401,10 @@ dialog.sharedlg .why{margin:10px 0 0}
 .drcard .row{display:flex;gap:8px;flex-wrap:wrap;margin-top:4px}
 .debatte .dwid{font-size:12.5px;background:#FDF5F6;border:1px solid #F0C9CF;border-radius:6px;padding:6px 8px}
 .debatte .dwid b{color:#8A0E22}
+/* 1.12 abgeschlossene Begutachtungen */
+.pill.st-reg{background:#EEF0F3;color:#4A5263}
+.pill.st-parl{background:#E4EEF9;color:#1D4F8C}
+.pill.st-kund{background:#E2F2E8;color:#22603B}
+.drsub{font-size:17px;margin:26px 0 2px;display:flex;gap:8px;align-items:baseline}
+.drsubp{margin:0 0 10px;max-width:90ch}
+.drseg{margin:0 0 12px;flex-wrap:wrap}
