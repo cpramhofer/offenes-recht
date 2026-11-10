@@ -318,3 +318,82 @@ dialog.sharedlg .why{margin:10px 0 0}
 @media (max-width:760px){.gremium .glist.two{grid-template-columns:minmax(0,1fr)}.konto .hero{grid-template-columns:repeat(2,minmax(0,1fr))}.konto .ktabs a{padding:10px 10px}}
 .gremium .glist .gcard{border:1px solid var(--rule);border-radius:8px;background:var(--surface);padding:14px 16px}
 .konto .ktabs{position:relative}
+/* 1.11 Debatte */
+.debatte{--s-weniger:#8A4200;--s-weniger-bg:#FBEEDF;--s-weniger-bar:#C8701E;--s-praez:#4A5263;--s-praez-bg:#EEF0F3;--s-praez-bar:#8A93A3;--s-mehr:#1D4F8C;--s-mehr-bg:#E4EEF9;--s-mehr-bar:#2F6DB5}
+.debatte .t-weniger{color:var(--s-weniger)}.debatte .t-praez{color:var(--s-praez)}.debatte .t-mehr{color:var(--s-mehr)}
+.debatte .dtiles{grid-template-columns:repeat(4,minmax(0,1fr))}
+.debatte .dk-tile{border:1px solid var(--rule);border-radius:8px;padding:12px 14px;background:var(--surface);display:flex;flex-direction:column;gap:2px;text-align:left;font:inherit;color:var(--ink);cursor:pointer}
+.debatte .dk-tile:hover{border-color:var(--accent)}
+.debatte .dk-tile b{font-size:26px;line-height:1.1;font-weight:600}
+.debatte .dk-tile .tl{font-weight:600}.debatte .dk-tile .sub{font-size:12.5px;color:var(--muted)}
+.debatte .dk-tile.strittig b{color:var(--accent)}.debatte .dk-tile.einig b{color:#22603B}
+.debatte .chip.static{cursor:default}
+.debatte .dnote{border:1px dashed var(--rule);border-radius:8px;padding:10px 12px;margin:0 0 14px}
+.debatte .dmap{border:1px solid var(--rule);border-radius:8px;background:var(--surface);padding:14px 16px;margin:0 0 18px}
+.debatte .dmap h2{margin:0;font-size:15px;border:0;padding:0}
+.debatte .dmx-legend{display:flex;flex-wrap:wrap;gap:12px;font-size:12px;align-items:center}
+.debatte .dmx-legend span{display:inline-flex;gap:5px;align-items:center}
+.debatte .dsw{display:inline-block;width:12px;height:12px;border-radius:3px}
+.debatte .dmrow{display:grid;grid-template-columns:140px minmax(0,1fr);gap:10px;align-items:start;margin-top:10px}
+.debatte .dmrow>div{display:flex;flex-wrap:wrap;gap:4px}
+.debatte .dcell{min-height:30px;padding:3px 8px;border-radius:5px;font:12px var(--f-mono,ui-monospace,monospace);cursor:pointer}
+.debatte .dk-strittig{background:#B3122C;color:#fff;border:1px solid #B3122C}
+.debatte .dk-mehrere{background:#FBEEDF;color:#7A3B00;border:1px solid #E3B98C}
+.debatte .dk-einig{background:#2C7A4B;color:#fff;border:1px solid #2C7A4B}
+.debatte .dk-anregung{background:#E4EEF9;color:#1D4F8C;border:1px solid #9DB4D3}
+.debatte .dk-legistik{background:#F5F6F8;color:#4A5263;border:1px solid var(--rule)}
+.debatte .pill.dk-strittig,.debatte .pill.dk-einig,.debatte .pill.dk-mehrere,.debatte .pill.dk-anregung,.debatte .pill.dk-legistik{font-size:11.5px}
+.debatte .dlist{display:flex;flex-direction:column;gap:12px}
+.debatte .dexpl{margin:0 0 4px;max-width:90ch}
+.debatte .dissue{border:1px solid var(--rule);border-radius:10px;background:var(--surface);overflow:hidden}
+.debatte .dissue.k-strittig{border-color:#E6B8C0}
+.debatte .dhead{width:100%;text-align:left;background:none;border:0;padding:14px 18px;display:flex;flex-direction:column;gap:6px;font:inherit;color:var(--ink);cursor:pointer}
+.debatte .dmeta{display:flex;gap:10px;align-items:center;flex-wrap:wrap;width:100%}
+.debatte .dplace{font-family:var(--f-mono,ui-monospace,monospace);font-size:12.5px;color:var(--accent)}
+.debatte .dcount{margin-left:auto}
+.debatte .dchev{width:16px;text-align:center;color:var(--muted);font-size:16px}
+.debatte .dtitle{font-family:var(--f-law);font-size:19px;font-weight:600;line-height:1.25}
+.debatte .dbar{display:flex;height:8px;border-radius:4px;overflow:hidden;background:#EEF0F3;width:100%}
+.debatte .dbar i{display:block;height:100%}
+.debatte .dbar .s-weniger{background:var(--s-weniger-bar)}.debatte .dbar .s-praez{background:var(--s-praez-bar)}.debatte .dbar .s-mehr{background:var(--s-mehr-bar)}.debatte .dbar .s-offen{background:#DCE0E7}
+.debatte .dlegend{display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;font-size:12px;width:100%}
+.debatte .dbody{border-top:1px solid var(--rule);padding:16px 18px;display:flex;flex-direction:column;gap:14px}
+.debatte .dtext{margin:4px 0 0;font-family:var(--f-law);font-size:15px;line-height:1.6;background:var(--bg,#F5F6F8);border:1px solid var(--rule);border-radius:6px;padding:10px 12px}
+.debatte .dcols{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:12px;align-items:start}
+.debatte .dcol{display:flex;flex-direction:column;gap:8px}
+.debatte .dside{border-radius:6px;padding:8px 12px;display:flex;flex-direction:column;font-size:12px}
+.debatte .dside b{font-size:14px}
+.debatte .dside.s-weniger{background:var(--s-weniger-bg);color:var(--s-weniger)}.debatte .dside.s-praez{background:var(--s-praez-bg);color:var(--s-praez)}
+.debatte .dside.s-mehr{background:var(--s-mehr-bg);color:var(--s-mehr)}.debatte .dside.s-offen{background:#F5F6F8;color:var(--muted);border:1px dashed var(--rule)}
+.debatte .dempty{border:1px dashed var(--rule);border-radius:6px;padding:8px 12px;font-size:12.5px}
+.debatte .darg{border:1px solid var(--rule);border-radius:8px;padding:12px;display:flex;flex-direction:column;gap:6px;background:var(--surface)}
+.debatte .darg p{margin:0;font-size:13.5px;line-height:1.55;overflow-wrap:anywhere}
+.debatte .dorg{display:flex;gap:6px;align-items:center;flex-wrap:wrap;font-size:13.5px}
+.debatte .dsrc{display:flex;gap:10px;flex-wrap:wrap;font-size:12px}
+.debatte .drate{display:flex;gap:6px;align-items:center;flex-wrap:wrap;border-top:1px solid #EEF0F3;padding-top:8px}
+.debatte .drate .btn.sm{padding:4px 10px;min-height:32px;font-size:12.5px}
+.debatte .drate .btn[aria-pressed="true"]{background:var(--ink);color:#fff;border-color:var(--ink)}
+.debatte .dscore{margin-left:auto;font-size:12px}
+.debatte .dcontra{border:1px solid #F0C9CF;background:#FDF5F6;border-radius:8px;padding:12px 14px;display:flex;flex-direction:column;gap:10px}
+.debatte .dcontra>b{color:#8A0E22}
+.debatte .dpair{display:grid;grid-template-columns:minmax(0,1fr) auto minmax(0,1fr);gap:10px;align-items:center}
+.debatte .dpair>div{background:var(--surface);border:1px solid var(--rule);border-radius:6px;padding:8px 10px;font-size:13px;display:flex;flex-direction:column;gap:2px}
+.debatte .dpair p{grid-column:1/-1;margin:0;font-size:13px}
+.debatte .dvs{color:var(--accent);font-weight:600;font-size:18px}
+.debatte .dfoot{display:flex;justify-content:space-between;gap:12px;align-items:center;flex-wrap:wrap;background:var(--bg,#F5F6F8);border-radius:8px;padding:12px 14px}
+.debatte .dq{font-family:var(--f-law);font-size:16px}
+.debatte .dleg{list-style:none;margin:0;padding:0}
+.debatte .dleg li{display:grid;grid-template-columns:220px minmax(0,1fr) auto;gap:12px;padding:9px 0;border-bottom:1px solid #EEF0F3;font-size:13.5px}
+.debatte .dmx th,.debatte .dmx td{vertical-align:top}
+.debatte .dmx thead th{font-size:12px;min-width:110px}
+.debatte .dmx thead th .pill{display:inline-block;margin-top:4px}
+.debatte .dmx td{text-align:center}
+.debatte .dsym.on{display:inline-block;min-width:28px;padding:3px 0;border-radius:4px;font-weight:600;background:#F5F6F8}
+.debatte .dsym.t-mehr{background:var(--s-mehr-bg)}.debatte .dsym.t-weniger{background:var(--s-weniger-bg)}.debatte .dsym.t-praez{background:var(--s-praez-bg)}
+@media (max-width:760px){.debatte .dtiles{grid-template-columns:repeat(2,minmax(0,1fr))}.debatte .dmrow{grid-template-columns:1fr;gap:4px}
+  .debatte .dpair{grid-template-columns:1fr}.debatte .dvs{justify-self:center;transform:rotate(90deg)}.debatte .dleg li{grid-template-columns:1fr;gap:2px}.debatte .dcount{margin-left:0}}
+.debatte .dfoot a.btn,.debatte .dfoot a.btn:hover{color:#fff;text-decoration:none}
+.debatte .dmx tbody th{text-transform:none;letter-spacing:0;font-size:13px;font-weight:500;color:var(--ink);text-align:left;min-width:180px}
+.debatte .dmx tbody th a{color:var(--ink)}
+.debatte .dmx thead th{text-transform:none;letter-spacing:0}
+.debatte .dmx thead th .linkbtn{text-align:left;font-weight:600}

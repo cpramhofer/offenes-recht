@@ -72,6 +72,16 @@ async function route(){
   const p = location.hash.replace(/^#\/?/, "").split("/").filter(Boolean);
   S.compare = false;
   if (p[0]==="statistik"){ location.replace("#/gremium/statistik"); return; }
+  if (p[0]==="debatte" && /^\d{8}$/.test(p[1]||"")){
+    const fresh = S.page !== "debatte" || S.debGnr !== p[1];
+    S.page = "debatte"; S.mode = "home"; S.gnr = null; S.law = null; if (S.panel==="anchor") S.panel = "default";
+    if (S.debGnr !== p[1]){ S.debGnr = p[1]; S.deb = null; S.debOpen = null; S.debTab = "streit"; }
+    S.debTab = ["streit","einig","weitere","legistik","matrix"].includes(p[2]) ? p[2] : (fresh ? "streit" : S.debTab);
+    if (!S.all) await loadAll().catch(()=>{});
+    render(); if (fresh || !S.deb) { await loadDebate(); render(); }
+    if (fresh) window.scrollTo(0,0);
+    hit("debatte", p[1]); return;
+  }
   if (["impressum","datenschutz","reset","api","projekt","moderation","paket","zahlen","konto","gremium"].includes(p[0])){
     if (p[0]==="gremium"){
       S.gTab = GTABS.some(t => t[0]===p[1]) ? p[1] : "antraege"; if (S.panel==="gremium") S.panel = "default";
@@ -275,7 +285,7 @@ function draftCard(d){
     <div class="chead"><span class="pill pkg">${esc(d.nr)}</span><span class="vfy">${esc(d.ressort||"")}</span>${left!==null?`<span class="pill ${left<=3?"s-umstritten":"s-diskutiert"}">${left<0?"Frist abgelaufen":left===0?"Frist endet heute":`noch ${left} ${left===1?"Tag":"Tage"}`}</span>`:""}</div>
     <a class="paddr" href="${d.url ? "#/g/"+d.gnr : esc(d.parliament_url)}">${esc(d.title)}</a>
     <div class="why">Begutachtung bis ${fmtIso(d.deadline)} · ${esc(d.ministry||"")}</div>
-    <div class="why">${d.contributions ? `${d.contributions} ${d.contributions===1?"Beitrag":"Beiträge"} hier` : "Noch keine Beiträge hier"} · ${d.statements_parliament} Stellungnahmen beim Parlament</div>
+    <div class="why">${d.contributions ? `${d.contributions} ${d.contributions===1?"Beitrag":"Beiträge"} hier · <a href="#/debatte/${d.gnr}">Debatte</a>` : "Noch keine Beiträge hier"} · ${d.statements_parliament} Stellungnahmen beim Parlament</div>
   </article>`;
 }
 function pkgCard(p){
@@ -387,7 +397,7 @@ function renderToc(){
     <div class="why">${nf(S.norms.length)} Normen${loading?` · Überschriften werden geladen (${nf(loading)} offen)`:""}</div>
     <ol class="toclist">${list.map(n => { const c = countBy(n.pid), on = c ? Math.max(1, Math.round(c/max*5)) : 0;
       return `<li><button data-pid="${n.pid}" aria-current="${n.pid===S.pid}"><span class="pn">${esc(n.label)}</span><span class="pt">${esc(n.title||"")}</span><span class="heat" title="${c} Beiträge">${[1,2,3,4,5].map(k=>`<i class="${k<=on?"on":""}"></i>`).join("")}</span></button></li>`; }).join("")}</ol>
-    <div class="navbtns"><button class="btn ghost" id="ovbtn">Top-Vorschläge in ${isDraftLaw()?"diesem Entwurf":"diesem Gesetz"}</button>${isDraftLaw() ? `<button class="btn ghost" id="stellungnahme">Beiträge als Stellungnahme</button>` : (() => { const wk = `${S.gnr}/gesetz/ganz`, nc = S.data.filter(x => !x.removed && x.key===wk).length;
+    <div class="navbtns">${isDraftLaw() || S.data.some(x => !x.removed) ? `<a class="btn" href="#/debatte/${S.law.gnr}">Debatte: Streitpunkte und Positionen</a>` : ""}<button class="btn ghost" id="ovbtn">Top-Vorschläge in ${isDraftLaw()?"diesem Entwurf":"diesem Gesetz"}</button>${isDraftLaw() ? `<button class="btn ghost" id="stellungnahme">Beiträge als Stellungnahme</button>` : (() => { const wk = `${S.gnr}/gesetz/ganz`, nc = S.data.filter(x => !x.removed && x.key===wk).length;
       return `<button class="btn ghost" data-whole="${wk}">Ganze Rechtsvorschrift aufheben${nc?` (${nc})`:""}</button>`; })()}<button class="btn ghost" id="botsbtn">Zugelassene KI-Bots</button><a class="btn ghost" href="#/projekt/bewertung">So wird bewertet</a></div>`;
   const cur = $("toc").querySelector('[aria-current="true"]'); if (cur && !q) cur.scrollIntoView({block:"nearest"});
 }
@@ -893,7 +903,7 @@ const STAT_ROWS = [
   ["ratings", "Bewertungen"], ["pairs", "Paarvergleiche"], ["packages", "Reformpakete"], ["follows", "Neu gefolgt"], ["reports", "Meldungen"],
 ];
 const STAT_COLS = [["heute","Heute"],["7","7 Tage"],["30","30 Tage"],["365","12 Monate"],["gesamt","Gesamt"]];
-const PAGE_NAMES = {home:"Startseite", law:"Rechtsvorschriften", draft:"Begutachtungsentwürfe", paket:"Reformpakete", zahlen:"Recht in Zahlen", projekt:"Über das Projekt", api:"API & MCP", moderation:"Moderation", konto:"Mein Konto", impressum:"Impressum", datenschutz:"Datenschutz", statistik:"Statistik", gremium:"Gremium", other:"Sonstige"};
+const PAGE_NAMES = {home:"Startseite", law:"Rechtsvorschriften", draft:"Begutachtungsentwürfe", paket:"Reformpakete", zahlen:"Recht in Zahlen", projekt:"Über das Projekt", api:"API & MCP", moderation:"Moderation", konto:"Mein Konto", impressum:"Impressum", datenschutz:"Datenschutz", statistik:"Statistik", gremium:"Gremium", debatte:"Debatte", other:"Sonstige"};
 function renderStatistik(){
   const u = S.user;
   if (!u || !u.gremium) return `<article class="legal doc"><div class="lbl">Statistik</div><h1>Nur für das Zulassungsgremium</h1><p>Bitte als Gremiumsmitglied anmelden.</p></article>`;
@@ -943,11 +953,109 @@ function renderStatistik(){
   </article>`;
 }
 
+// ---- Debatte: Streitpunkte, Argumente je Richtung, Widersprüche, Stakeholder-Matrix
+async function loadDebate(){
+  try { S.deb = await api("/api/debate?gnr="+S.debGnr); }
+  catch(e){ S.deb = {error:e.message}; }
+  if (S.deb && S.deb.issues && !S.debOpen){ const f = S.deb.issues.find(g => g.kind==="strittig"); S.debOpen = new Set(f ? [f.id] : []); }
+}
+const DEB_KINDS = {strittig:"strittig", einig:"einig", mehrere:"mehrere Positionen", anregung:"einzelne Anregung", legistik:"nur legistisch"};
+const DEB_TAB_OF = {strittig:"streit", einig:"einig", mehrere:"weitere", anregung:"weitere", legistik:"legistik"};
+function debGo(id){
+  const g = (S.deb && S.deb.issues || []).find(x => x.id===id); if (!g) return;
+  S.debTab = DEB_TAB_OF[g.kind]; S.debOpen = S.debOpen || new Set(); S.debOpen.add(id); renderPage();
+  const el = document.getElementById("deb-"+id); if (el) el.scrollIntoView({behavior:"smooth", block:"start"});
+}
+const orgsTxt = a => a.organizations.join(", ");
+function debArg(a){
+  const sv = a.soundness, share = sv.votes ? Math.round(sv.share*100)+" % stichhaltig · " : "";
+  const RB = [["h","Ja"],["t","Teilweise"],["n","Nein"]];
+  return `<div class="darg">
+    <div class="dorg"><b>${esc(orgsTxt(a))}</b>${a.category?`<span class="chip static">${esc(a.category)}</span>`:""}</div>
+    <p>${esc(a.summary)}</p>
+    <div class="dsrc why">${a.sources.map(s => s.url ? `<a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.ref||"Quelle")}</a>` : esc(s.ref||"")).join(" · ")}
+      ${a.places.length>1?`<span>betrifft ${a.places.length} Stellen</span>`:""}
+      <span>${a.contributions.length===1?"1 Beitrag":a.contributions.length+" Beiträge, zusammengefasst"}</span>
+      ${a.bot_wording?`<span title="Die Stellungnahme enthält keinen Textvorschlag; der Bot hat den Wortlaut ausformuliert.">Wortlaut vom Bot</span>`:""}
+      <a href="#/g/${esc(a.key)}">ansehen</a></div>
+    <div class="drate"><span class="why">Stichhaltig?</span>${RB.map(([v,l]) => `<button class="btn ghost sm" data-argrate="${a.id}" data-v="${v}" aria-pressed="${a.mine===v}">${l}</button>`).join("")}
+      <span class="why dscore">${share}${sv.votes} ${sv.votes===1?"Stimme":"Stimmen"}</span></div>
+  </div>`;
+}
+function debIssue(g, st){
+  const open = S.debOpen && S.debOpen.has(g.id), c = g.counts, tot = g.arguments.length || 1;
+  const pct = n => Math.round(n*100/tot)+"%";
+  const cols = ["weniger","praez","mehr"].concat(c[""] ? [""] : []);
+  return `<article class="dissue k-${g.kind}" id="deb-${g.id}">
+    <button class="dhead" data-debtoggle="${g.id}" aria-expanded="${open}">
+      <span class="dmeta"><span class="pill dk-${g.kind}">${DEB_KINDS[g.kind]}</span><span class="dplace">${esc(g.places.map(p => p.label).slice(0,3).join(" · "))}${g.places.length>3?` · +${g.places.length-3}`:""}</span>
+        <span class="why dcount">${g.arguments.length} ${g.arguments.length===1?"Argument":"Argumente"} von ${g.organizations} ${g.organizations===1?"Stimme":"Stimmen"}</span><span class="dchev" aria-hidden="true">${open?"−":"+"}</span></span>
+      <span class="dtitle">${esc(g.title)}</span>
+      ${g.question?`<span class="why">${esc(g.question)}</span>`:""}
+      <span class="dbar" aria-hidden="true"><i class="s-weniger" style="width:${pct(c.weniger)}"></i><i class="s-praez" style="width:${pct(c.praez)}"></i><i class="s-mehr" style="width:${pct(c.mehr)}"></i><i class="s-offen" style="width:${pct(c[""])}"></i></span>
+      <span class="dlegend"><span class="t-weniger">${c.weniger} ${st.weniger.label.toLowerCase()}</span><span class="t-praez">${c.praez} ${st.praez.label.toLowerCase()}</span><span class="t-mehr">${c.mehr} ${st.mehr.label.toLowerCase()}</span>${c[""]?`<span class="why">${c[""]} ohne Richtung</span>`:""}</span>
+    </button>
+    ${open ? `<div class="dbody">
+      ${g.text ? `<div><div class="lbl">Text${S.deb.draft?" des Entwurfs":""} · ${esc(g.places[0].label)}</div><p class="dtext">${esc(g.text)}</p></div>` : ""}
+      <div class="dcols">${cols.map(k => { const as = g.arguments.filter(a => a.stance===k);
+        return `<div class="dcol"><div class="dside s-${k||"offen"}"><b>${k ? esc(st[k].label) : "Richtung nicht angegeben"} · ${as.length}</b><span>${k ? esc(st[k].hint) : "noch nicht eingeordnet"}</span></div>
+          ${as.length ? as.map(debArg).join("") : `<div class="dempty why">Keine Position in diese Richtung.</div>`}</div>`; }).join("")}</div>
+      ${g.contradictions.length ? `<div class="dcontra"><b>Widersprüche</b>${g.contradictions.map(w => `<div class="dpair">
+          <div><b>${esc(w.a.organizations.join(", "))}</b><span>${esc(w.a.summary)}</span></div><span class="dvs" aria-label="widerspricht">↔</span>
+          <div><b>${esc(w.b.organizations.join(", "))}</b><span>${esc(w.b.summary)}</span></div>
+          ${w.note?`<p>${w.explicit?"<b>Worin:</b> ":""}${esc(w.note)}</p>`:""}</div>`).join("")}</div>` : ""}
+      <div class="dfoot">${g.question?`<div><div class="lbl">Zu entscheiden</div><div class="dq">${esc(g.question)}</div></div>`:"<div></div>"}
+        <a class="btn" href="#/g/${esc(g.places[0].key)}">${g.proposals ? `Vorschläge an der Stelle vergleichen (${g.proposals})` : "Zur Stelle"}</a></div>
+    </div>` : ""}
+  </article>`;
+}
+function renderDebatte(){
+  const d = S.deb;
+  if (!d) return `<article class="legal doc debatte"><div class="lbl">Debatte</div><h1>Debatte</h1><div class="empty">Lade …</div></article>`;
+  if (d.error) return `<article class="legal doc"><h1>Debatte</h1><p>${esc(d.error)}</p></article>`;
+  const sm = d.summary, st = d.stances, tab = S.debTab || "streit";
+  const by = k => d.issues.filter(g => g.kind===k);
+  const weitere = d.issues.filter(g => g.kind==="mehrere" || g.kind==="anregung");
+  const left = daysLeft(d.deadline);
+  const TABS = [["streit",`Strittig (${sm.contested})`],["einig",`Einigkeit (${sm.agreed})`],["weitere",`Weitere Anregungen (${weitere.length})`],["legistik",`Legistisches (${sm.legistic})`],["matrix","Wer steht wo"]];
+  const tiles = [["streit",sm.contested,"Streitpunkte","Positionen widersprechen einander","strittig"],["einig",sm.agreed,"Einigkeit","Gleiche Richtung, keine Gegenstimme","einig"],
+                 ["matrix",sm.organizations,sm.organizations===1?"Stimme":"Stimmen","Organisationen und Personen","stimmen"],["legistik",sm.legistic,"Legistisch","Formale Korrekturen","legistik"]];
+  let body = "";
+  if (tab==="streit") body = `<p class="why dexpl">Jede Position wird am Text gemessen: <b class="t-weniger">${esc(st.weniger.label)}</b> (${esc(st.weniger.hint.toLowerCase())}), <b class="t-praez">${esc(st.praez.label)}</b> (${esc(st.praez.hint.toLowerCase())}) oder <b class="t-mehr">${esc(st.mehr.label)}</b> (${esc(st.mehr.hint.toLowerCase())}). Gleichlautende Beiträge derselben Stimme sind zu einem Argument zusammengefasst.</p>
+      ${by("strittig").map(g => debIssue(g, st)).join("") || `<div class="empty">Noch keine Streitpunkte. Streit wird erkannt, wenn Beiträge eine Richtung angeben und einander widersprechen.</div>`}`;
+  else if (tab==="einig") body = by("einig").map(g => debIssue(g, st)).join("") || `<div class="empty">Noch keine Punkte, bei denen sich mehrere Stimmen in dieselbe Richtung einig sind.</div>`;
+  else if (tab==="weitere") body = weitere.map(g => debIssue(g, st)).join("") || `<div class="empty">Keine weiteren Anregungen.</div>`;
+  else if (tab==="legistik") body = by("legistik").length ? `<ul class="dleg">${by("legistik").map(g => `<li><a class="dplace" href="#/g/${esc(g.places[0].key)}">${esc(g.places[0].label)}</a><span>${esc(g.arguments.map(a => a.summary).join(" · "))}</span><span class="why">${esc([...new Set(g.arguments.flatMap(a => a.organizations))].join(", "))}</span></li>`).join("")}</ul>` : `<div class="empty">Keine rein legistischen Korrekturen (Kategorie „Legistik“).</div>`;
+  else {
+    const m = d.matrix, SY = {"+":["t-mehr",st.mehr.label],"−":["t-weniger",st.weniger.label],"~":["t-praez",st.praez.label],"±":["",`${st.weniger.label} und ${st.mehr.label.toLowerCase()}`],"•":["","Richtung nicht angegeben"]};
+    body = m.columns.length ? `<div class="dmx-legend why"><span><b class="t-mehr">+</b> ${esc(st.mehr.label)}</span><span><b class="t-weniger">−</b> ${esc(st.weniger.label)}</span><span><b class="t-praez">~</b> ${esc(st.praez.label)}</span><span><b>±</b> beide Richtungen</span><span><b>•</b> ohne Richtung</span><span>leer: keine Äußerung</span></div>
+      <div class="tablewrap"><table class="dt dmx"><thead><tr><th scope="col">Stimme</th>${m.columns.map(c => `<th scope="col"><button class="linkbtn" data-debgo="${c.id}">${esc(c.title)}</button><span class="pill dk-${c.kind}">${DEB_KINDS[c.kind]}</span></th>`).join("")}</tr></thead>
+      <tbody>${m.rows.filter(r => r.cells.some(Boolean)).map(r => `<tr><th scope="row">${r.url?`<a href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.organization)}</a>`:esc(r.organization)}${r.ref?`<span class="why"> ${esc(r.ref)}</span>`:""}</th>${r.cells.map((v,i) => `<td><span class="dsym ${v?(SY[v]||[""])[0]:""} ${v?"on":""}" title="${esc(r.organization)} · ${esc(m.columns[i].title)}: ${esc(v ? SY[v][1] : "keine Äußerung")}">${v}</span></td>`).join("")}</tr>`).join("")}</tbody></table></div>`
+      : `<div class="empty">Die Matrix entsteht, sobald es Streitpunkte oder Einigkeit gibt.</div>`;
+  }
+  return `<article class="legal doc konto debatte">
+    <div class="lbl">${d.draft ? `Begutachtung · ${esc(d.abbreviation||"")}${d.ministry?" · "+esc(d.ministry):""}` : "Debatte"}</div>
+    <h1>${esc(d.title)}</h1>
+    <div class="kmeta">${d.draft && left!==null ? `<span class="pill ${left<=3?"s-umstritten":"s-diskutiert"}">${left<0?"Begutachtung abgeschlossen":left===0?"Begutachtungsfrist endet heute":`Begutachtung noch ${left} ${left===1?"Tag":"Tage"}`}</span>` : ""}
+      ${d.statements!=null?`<span class="chip static">${d.statements} Stellungnahmen beim Parlament</span>`:""}<span class="chip static">${sm.contributions} Beiträge · ${sm.arguments} Argumente</span>
+      <a class="linkbtn subtle" href="#/g/${d.gnr}">Zum ${d.draft?"Entwurfstext":"Text"}</a>${followBtn("law", d.gnr, "linkbtn subtle")}${shareBtn("/e/"+d.gnr)}</div>
+    <div class="hero dtiles">${tiles.map(([k,n,l,sub,cls]) => `<button data-debtab="${k}" class="dk-tile ${cls}"><b>${n}</b><span class="tl">${l}</span><span class="sub">${sub}</span></button>`).join("")}</div>
+    ${sm.without_stance ? `<p class="dnote why">${sm.without_stance} von ${sm.contributions} Beiträgen haben noch keine Richtung und zählen daher weder als Streit noch als Einigkeit. Verfasserinnen, Verfasser und Bots können sie nachträglich einordnen (API und MCP: <code>annotate_contribution</code>).</p>` : ""}
+    <section class="dmap" aria-labelledby="dmap-h"><div class="khead"><h2 id="dmap-h">Streitkarte</h2>
+      <span class="dmx-legend why">${["strittig","mehrere","einig","anregung","legistik"].map(k => `<span><i class="dsw dk-${k}"></i>${DEB_KINDS[k]}</span>`).join("")}</span></div>
+      ${d.map.map(r => `<div class="dmrow"><span class="why">${esc(r.label)}</span><div>${r.places.map(p => `<button class="dcell dk-${p.kind}" data-debgo="${p.group}" title="${esc(p.title)}: ${DEB_KINDS[p.kind]}">${esc(p.label)}</button>`).join("")}</div></div>`).join("") || `<div class="empty">Noch keine Beiträge.</div>`}
+    </section>
+    <nav class="ktabs" aria-label="Bereiche der Debatte">${TABS.map(([k,l]) => `<a href="#/debatte/${d.gnr}/${k}" aria-current="${tab===k}">${l}</a>`).join("")}</nav>
+    <div class="dlist">${body}</div>
+  </article>`;
+}
+
 // ---- Rechtliches und Passwort-Link
 function renderPage(){
   const L = LEGAL; let html = "";
   if (S.page==="konto") html = renderKonto();
   else if (S.page==="gremium") html = renderGremiumPage();
+  else if (S.page==="debatte") html = renderDebatte();
   else if (S.page==="impressum") html = `<article class="legal"><div class="lbl">Rechtliches</div><h1>Impressum und Offenlegung</h1>
     <h2>Medieninhaber und Herausgeber</h2><p>${esc(L.name)}<br>${esc(L.ort)}<br>E-Mail: <a href="mailto:${esc(L.mail)}">${esc(L.mail)}</a></p>
     <h2>Offenlegung nach § 25 Mediengesetz</h2><p>Medieninhaber: ${esc(L.name)}, ${esc(L.ort)}.</p>
@@ -1398,6 +1506,16 @@ document.addEventListener("click", e => {
 });
 document.addEventListener("click", async e => {
   const t = e.target.closest("button, .unit, [data-goto]");
+  if (t && t.dataset.debtab){ S.debTab = t.dataset.debtab; renderPage(); return; }
+  if (t && t.dataset.debgo){ debGo(t.dataset.debgo); return; }
+  if (t && t.dataset.debtoggle){ const id = t.dataset.debtoggle; S.debOpen = S.debOpen || new Set(); S.debOpen.has(id) ? S.debOpen.delete(id) : S.debOpen.add(id); renderPage(); return; }
+  if (t && t.dataset.argrate){
+    if (!S.user){ openAuth("login"); return; }
+    const cur = t.getAttribute("aria-pressed")==="true";
+    try { await api("/api/argrate", {cid:+t.dataset.argrate, v: cur ? null : t.dataset.v}); await loadDebate(); renderPage(); toast(cur ? "Einschätzung zurückgenommen" : "Einschätzung gespeichert"); }
+    catch(err){ toast(err.message); }
+    return;
+  }
   if (!t || t.id==="selbtn") return;
   try {
     if (t.dataset.home!==undefined){ go("#/"); return; }

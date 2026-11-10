@@ -38,6 +38,9 @@ CREATE TABLE IF NOT EXISTS contributions(
   via TEXT DEFAULT 'web', created INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS ix_contrib_key ON contributions(key);
 CREATE TABLE IF NOT EXISTS ratings(user_id INTEGER, cid INTEGER, v TEXT, created INTEGER, PRIMARY KEY(user_id, cid));
+CREATE TABLE IF NOT EXISTS arg_ratings(user_id INTEGER, cid INTEGER, v TEXT, created INTEGER, PRIMARY KEY(user_id, cid));
+CREATE TABLE IF NOT EXISTS contribution_links(a INTEGER NOT NULL, b INTEGER NOT NULL, kind TEXT NOT NULL, note TEXT, user_id INTEGER, created INTEGER,
+  PRIMARY KEY(a, b, kind));
 CREATE TABLE IF NOT EXISTS pairwise(user_id INTEGER, a INTEGER, b INTEGER, winner INTEGER, created INTEGER, PRIMARY KEY(user_id, a, b));
 CREATE TABLE IF NOT EXISTS audit(id INTEGER PRIMARY KEY, actor INTEGER, action TEXT, target INTEGER, note TEXT, created INTEGER);
 CREATE TABLE IF NOT EXISTS laws(
@@ -141,6 +144,9 @@ def init_db(seed=True):
     if "gold" not in cols:
         c.execute("ALTER TABLE contributions ADD COLUMN gold INTEGER DEFAULT 0")   # Übererfüllung von EU-Recht
         c.execute("ALTER TABLE contributions ADD COLUMN celex TEXT")
+    if "stance" not in cols:                                             # Debatte: Richtung, Kategorie, Streitfrage, Quelle
+        for col in ("stance TEXT", "category TEXT", "issue TEXT", "question TEXT", "summary TEXT", "src_org TEXT", "src_ref TEXT", "src_url TEXT"):
+            c.execute("ALTER TABLE contributions ADD COLUMN " + col)
     ncols = [r[1] for r in c.execute("PRAGMA table_info(norms)")]
     if "kundmachung" not in ncols:
         c.execute("ALTER TABLE norms ADD COLUMN kundmachung TEXT")
@@ -910,7 +916,7 @@ def need(cond, code, msg):
     if not cond: raise ApiError(code, msg)
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "OffenesRecht/1.10"
+    server_version = "OffenesRecht/1.11"
 
     def log_message(self, fmt, *a):
         # bewusst ohne IP-Adresse (Datenschutz); Fehlersuche über Pfad und Status
@@ -1165,11 +1171,16 @@ def create_contribution(u, d, via):
     gold = 1 if d.get("gold") else 0; celex = None
     if gold and d.get("celex"):
         celex = celex_norm(str(d["celex"])); need(celex, 400, "Ungültige CELEX-Nummer, z. B. 32006L0123.")
+    meta = deb_meta(d)
+    links = deb_links_in(d, gnr)
     cur = db().execute("""INSERT INTO contributions(key,type,text,why,w_quote,w_from,w_to,user_id,via,created,base_text,op,gold,celex)
                           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                        (key, typ, text, why or None, wq, w.get("from") if wq else None, w.get("to") if wq else None, u["id"], via, now(), base, op, gold, celex))
+    cid = cur.lastrowid
+    if meta: db().execute("UPDATE contributions SET " + ",".join(k + "=?" for k in meta) + " WHERE id=?", (*meta.values(), cid))
+    for kind, other, note in links: deb_link(cid, other, kind, note, u["id"])
     db().commit()
-    return {"id": cur.lastrowid}
+    return {"id": cid}
 
 def r_contribute(h):
     u = h.session_user(); need(u, 401, "Bitte anmelden, um einen Beitrag zu schreiben.")
@@ -1572,7 +1583,7 @@ def r_norm(h):
 # mit API-Schlüssel (Authorization: Bearer …). REST und MCP verwenden dieselben Kernfunktionen.
 from urllib.parse import unquote
 
-APP_VERSION = "1.10"
+APP_VERSION = "1.11"
 READ_LIMIT_PER_MIN = int(os.environ.get("OR_API_READ_LIMIT", "120"))
 WRITE_LIMIT_PER_HOUR = int(os.environ.get("OR_API_WRITE_HOUR", "20"))
 WRITE_LIMIT_PER_DAY = int(os.environ.get("OR_API_WRITE_DAY", "100"))
@@ -1727,6 +1738,8 @@ def api_contribution(r, st, users, c):
         out["norm_changed_since"] = bool(cur and r["base_text"] and cur != r["base_text"])
     if r["w_quote"]: out["quote"] = {"text": r["w_quote"], "word_from": r["w_from"], "word_to": r["w_to"]}
     if r["gold"]: out["goldplating"] = {"celex": r["celex"], "url": eurlex(r["celex"]) if r["celex"] else None}
+    dv = deb_out(c, r)
+    if dv: out["debate"] = dv
     return out
 
 def _contrib_rows(gnr=None, key=None):
@@ -1782,8 +1795,8 @@ def _need_bot(bot):
     need(bot is not None, 401, "Schreiben erfordert den API-Schlüssel eines zugelassenen Bots (Authorization: Bearer …).")
     need(bot["role"] == "bot" and bot["status"] == "active", 403, "Dieser Bot ist nicht zugelassen.")
 
-def api_post(bot, key, type, text, reason=None, quote=None, goldplating=False, celex=None):
-    _need_bot(bot); gp = {"gold": bool(goldplating), "celex": celex}
+def api_post(bot, key, type, text, reason=None, quote=None, goldplating=False, celex=None, debate=None):
+    _need_bot(bot); gp = {"gold": bool(goldplating), "celex": celex, **(debate or {})}
     if (type or "").lower() in ("repeal", "streichung"):
         if (key or "").count("/") == 1: key = key.rstrip("/") + "/ganz"          # 'gnr/p74' = ganzer Paragraph
         key, unit = _resolve_key(key)
@@ -1803,6 +1816,331 @@ def api_post(bot, key, type, text, reason=None, quote=None, goldplating=False, c
     res = create_contribution(bot, {"key": key, "type": t, "text": text, "why": reason, "w": w, **gp}, "api")
     log(bot["id"], "api-post", res["id"]); db().commit()
     return api_get_contribution(res["id"])
+
+# ---------- Debatte: Streitpunkte, Widersprüche, Stakeholder ----------
+# Jede Position wird am Text gemessen: 'weniger' (geht zu weit), 'praez' (Wortlaut ändern, Richtung offen), 'mehr' (greift zu kurz).
+STANCES = {"weniger": "Zurücknehmen", "praez": "Präzisieren", "mehr": "Ausweiten"}
+STANCE_SUB = {"weniger": "Geht zu weit", "praez": "Richtung offen, Wortlaut ändern", "mehr": "Greift zu kurz", "": "Richtung nicht angegeben"}
+DEB_FIELDS = {"stance": ("stance", 10), "category": ("category", 40), "issue": ("issue", 120), "question": ("question", 300),
+              "summary": ("summary", 500), "source_org": ("src_org", 160), "source_ref": ("src_ref", 40), "source_url": ("src_url", 400)}
+LINK_KINDS = ("contradicts", "supports")
+_SRC_RE = re.compile(r"(?:Stakeholder:\s*|\);\s*)(.+?)\s*\((\d+/SN-\d+/ME),\s*(https?://[^\s)]+)\)")
+
+def deb_in(d):
+    """Debattenfelder aus einer API-/MCP-Anfrage (nur vorhandene Schlüssel)."""
+    out = {k: d[k] for k in (*DEB_FIELDS, *LINK_KINDS, "link_note") if k in d and d[k] is not None}
+    return out
+
+def deb_meta(d, partial=False):
+    """Prüft die Debattenfelder; liefert {Spalte: Wert}. Leerer Text löscht das Feld (nur bei partial)."""
+    out = {}
+    for k, (col, mx) in DEB_FIELDS.items():
+        if k not in d or d[k] is None: continue
+        v = re.sub(r"\s+", " ", str(d[k])).strip()
+        if not v:
+            if partial: out[col] = None
+            continue
+        need(len(v) <= mx, 400, f"{k}: höchstens {mx} Zeichen.")
+        if k == "stance":
+            v = {"less": "weniger", "more": "mehr", "clarify": "praez", "präzisieren": "praez"}.get(v.lower(), v.lower())
+            need(v in STANCES, 400, "stance: weniger, praez oder mehr.")
+        if k == "source_url": need(re.match(r"^https://", v), 400, "source_url: nur https-Links.")
+        out[col] = v
+    return out
+
+def deb_links_in(d, gnr):
+    out, note = [], (re.sub(r"\s+", " ", str(d.get("link_note") or "")).strip()[:300] or None)
+    for kind in LINK_KINDS:
+        ids = d.get(kind) or []
+        need(isinstance(ids, list) and len(ids) <= 20, 400, f"{kind}: Liste von höchstens 20 Beitrags-IDs.")
+        for x in ids:
+            try: x = int(x)
+            except (TypeError, ValueError): raise ApiError(400, f"{kind}: nur Beitrags-IDs.")
+            r = db().execute("SELECT key FROM contributions WHERE id=? AND removed_at IS NULL", (x,)).fetchone()
+            need(r and r["key"].split("/")[0] == gnr, 400, f"{kind}: Beitrag {x} gibt es in dieser Rechtsvorschrift nicht.")
+            out.append((kind, x, note))
+    return out
+
+def deb_link(a, b, kind, note, uid):
+    if a == b: return
+    db().execute("INSERT OR REPLACE INTO contribution_links VALUES(?,?,?,?,?,?)", (a, b, kind, note, uid, now()))
+
+def api_annotate(u, cid, d, gremium=False):
+    need(u is not None, 401, "Kein API-Schlüssel angegeben (Authorization: Bearer …).")
+    r = db().execute("SELECT * FROM contributions WHERE id=? AND removed_at IS NULL", (cid,)).fetchone()
+    need(r, 404, "Beitrag nicht gefunden.")
+    need(r["user_id"] == u["id"] or gremium, 403, "Nur eigene Beiträge lassen sich einordnen.")
+    meta = deb_meta(d, partial=True); gnr = r["key"].split("/")[0]
+    links = deb_links_in(d, gnr)
+    rm = d.get("remove_links") or []
+    need(meta or links or rm, 400, "Nichts zu ändern: stance, category, issue, question, summary, source_*, contradicts, supports oder remove_links angeben.")
+    if meta: db().execute("UPDATE contributions SET " + ",".join(k + "=?" for k in meta) + " WHERE id=?", (*meta.values(), cid))
+    for kind, other, note in links: deb_link(cid, other, kind, note, u["id"])
+    for x in rm:
+        db().execute("DELETE FROM contribution_links WHERE (a=? AND b=?) OR (a=? AND b=?)", (cid, int(x), int(x), cid))
+    log(u["id"], "annotate", cid, ", ".join(list(meta) + [f"{k}→{o}" for k, o, _ in links])[:300]); db().commit()
+    return api_get_contribution(cid)
+
+def _balanced_quote(s, start):
+    """Text innerhalb „…“ ab Position start, verschachtelte Anführungszeichen berücksichtigt."""
+    i = s.find("„", start)
+    if i < 0: return None
+    depth, j = 0, i
+    while j < len(s):
+        if s[j] == "„": depth += 1
+        elif s[j] == "“":
+            depth -= 1
+            if depth == 0: return s[i + 1:j]
+        j += 1
+    return s[i + 1:]
+
+def deb_source(r):
+    """Quelle(n) eines Beitrags: gespeichert oder aus der Begründung ('Stakeholder: X (19/SN-147/ME, https://…)')."""
+    if r["src_org"] or r["src_ref"]:
+        return [{"org": r["src_org"] or r["src_ref"], "ref": r["src_ref"], "url": r["src_url"]}]
+    out = []
+    for m in _SRC_RE.finditer(r["why"] or ""):
+        org = m.group(1).split(";")[0].strip().replace(" - ", " – ")
+        if org.lower().startswith("ursprüngl"): continue
+        out.append({"org": org, "ref": m.group(2), "url": m.group(3)})
+    return out
+
+def deb_core(r):
+    """Kernaussage: eigene Zusammenfassung, sonst das Originalzitat der Stellungnahme, sonst die Begründung bzw. der Text."""
+    if r["summary"]: return r["summary"]
+    why = r["why"] or ""
+    m = re.search(r"Ursprüngliche[rn]?\s+Vorschl[äa]ge?[^„:]*:?", why)
+    if m:
+        q = _balanced_quote(why, m.end())
+        if q and len(q) > 15: return q.strip()
+    why = re.sub(r"^Stakeholder:.*?\)\.\s*", "", why, flags=re.S)
+    return (why or r["text"] or "").strip()
+
+def deb_stance(r):
+    if r["stance"]: return r["stance"]
+    if r["op"] == "repeal": return "weniger"
+    return ""
+
+def deb_out(c, r):
+    out = {}
+    for k, (col, _) in DEB_FIELDS.items():
+        if k.startswith("source_"): continue
+        if r[col]: out[k] = r[col]
+    if r["op"] == "repeal" and "stance" not in out: out["stance"] = "weniger"
+    src = deb_source(r)
+    if src: out["source"] = src[0] if len(src) == 1 else src
+    for kind in LINK_KINDS:
+        ids = [x["b"] for x in c.execute("SELECT b FROM contribution_links WHERE a=? AND kind=?", (r["id"], kind))]
+        ids += [x["a"] for x in c.execute("SELECT a FROM contribution_links WHERE b=? AND kind=?", (r["id"], kind))]
+        if ids: out[kind] = sorted(set(ids))
+    return out
+
+def _short(t, n=160):
+    t = re.sub(r"\s+", " ", t or "").strip()
+    return t if len(t) <= n else t[:n].rsplit(" ", 1)[0] + " …"
+
+def debate(gnr, user=None, public=False):
+    c = db(); need(re.fullmatch(r"\d{8}", gnr or ""), 400, "gnr: Gesetzesnummer mit 8 Ziffern.")
+    law = c.execute("SELECT gnr, kurztitel, abk, tgroup FROM laws WHERE gnr=?", (gnr,)).fetchone()
+    need(law, 404, "Diese Rechtsvorschrift gibt es nicht.")
+    rows = c.execute("SELECT * FROM contributions WHERE key LIKE ? AND removed_at IS NULL ORDER BY id", (gnr + "/%",)).fetchall()
+    users = all_users(c); is_draft = law["tgroup"] == "me"
+    # Reihenfolge der Stellen: Norm, dann Einheit im Normtext
+    norms = {r["pid"]: r for r in c.execute("SELECT pid, label, sort, body FROM norms WHERE gnr=?", (gnr,))}
+    upos, ulab = {}, {}
+    for pid, n in norms.items():
+        units = json.loads(n["body"])["units"] if n["body"] else []
+        for i, u in enumerate(units): upos[(pid, u["a"])] = i; ulab[(pid, u["a"])] = u["n"]
+    def unit_of(key): p = key.split("/"); return "/".join(p[:3]) if len(p) >= 3 else key
+    def unit_sort(uk):
+        p = uk.split("/"); n = norms.get(p[1]) if len(p) > 1 else None
+        return ((n["sort"] if n else -1), upos.get((p[1], "/".join(p[2:])), 10**6) if len(p) > 2 else -1, uk)
+    def unit_label(uk, short=False):
+        p = uk.split("/")
+        if len(p) > 1 and p[1] == "gesetz": return "gesamte Rechtsvorschrift"
+        n = norms.get(p[1]) if len(p) > 1 else None; a = "/".join(p[2:])
+        if a == "ganz": return (n["label"] if n else p[1]) + " (gesamt)"
+        if is_draft:
+            lab = ulab.get((p[1], a)) or ""
+            full = ((n["label"] + " · ") if n and p[1] != "text" else "") + lab
+            return (lab.split(" · ")[-1] or lab or a) if short else full
+        lab = key_label(c, uk); abk = (law["abk"] or law["kurztitel"]) + " "
+        lab = lab[len(abk):] if lab.startswith(abk) else lab
+        return lab
+    # Argumente: gleiche Organisation, gleiche Richtung, gleiche Kernaussage = ein Argument
+    ids = [r["id"] for r in rows]; by_id = {r["id"]: r for r in rows}
+    links = [dict(x) for x in c.execute("SELECT * FROM contribution_links")] if ids else []
+    links = [l for l in links if l["a"] in by_id and l["b"] in by_id]
+    held = {r[0] for r in c.execute("SELECT id FROM users WHERE rating_hold=1")}
+    rat = {}
+    for x in c.execute("SELECT user_id, cid, v FROM arg_ratings"):
+        if x["cid"] in by_id and x["user_id"] not in held: rat.setdefault(x["cid"], []).append(x["v"])
+    mine = {x["cid"]: x["v"] for x in c.execute("SELECT cid, v FROM arg_ratings WHERE user_id=?", (user["id"],))} if user else {}
+    orgs = {}
+    def org_of(r):
+        src = deb_source(r)
+        if src:
+            res = []
+            for s_ in src:
+                k = "ref:" + (s_["ref"] or s_["org"]); orgs.setdefault(k, {"key": k, "name": s_["org"], "ref": s_["ref"], "url": s_["url"]}); res.append(k)
+            return res
+        a = users.get(r["user_id"]) or {}; k = "u:%d" % r["user_id"]
+        orgs.setdefault(k, {"key": k, "name": a.get("name") or "?", "ref": None, "url": None, "kind": KIND_OUT.get(a.get("role"), a.get("role"))})
+        return [k]
+    clusters = {}
+    for r in rows:
+        ok = tuple(org_of(r)); st = deb_stance(r); core = deb_core(r)
+        ck = (ok, st, (r["issue"] or "").lower(), re.sub(r"\W+", " ", core.lower())[:240])
+        cl = clusters.setdefault(ck, {"ids": [], "orgs": list(ok), "stance": st, "core": core, "units": [], "categories": set(), "issues": set(),
+                                       "questions": [], "bot_wording": False, "proposals": 0, "comments": 0})
+        cl["ids"].append(r["id"]); u = unit_of(r["key"])
+        if u not in cl["units"]: cl["units"].append(u)
+        if r["category"]: cl["categories"].add(r["category"])
+        if r["issue"]: cl["issues"].add(r["issue"])
+        if r["question"]: cl["questions"].append(r["question"])
+        if "eigene Umsetzung" in (r["why"] or ""): cl["bot_wording"] = True
+        if r["type"] == "prop": cl["proposals"] += 1
+        else: cl["comments"] += 1
+    # Streitpunkte: Stellen verbinden, wenn ein Argument mit klarer Richtung mehrere Stellen betrifft, gleiche Streitfrage, ausdrückliche Verknüpfung
+    parent = {}
+    def find(x):
+        parent.setdefault(x, x)
+        while parent[x] != x: parent[x] = parent[parent[x]]; x = parent[x]
+        return x
+    def union(a, b): parent[find(a)] = find(b)
+    for cl in clusters.values():
+        for u in cl["units"]: find(u)
+        if cl["stance"] in ("weniger", "mehr") and not cl["issues"]:
+            for u in cl["units"][1:]: union(cl["units"][0], u)
+    by_issue = {}
+    for r in rows:
+        if r["issue"]: by_issue.setdefault(r["issue"].lower(), []).append(unit_of(r["key"]))
+    for us in by_issue.values():
+        for u in us[1:]: union(us[0], u)
+    for l in links: union(unit_of(by_id[l["a"]]["key"]), unit_of(by_id[l["b"]]["key"]))
+    groups = {}
+    for cl in clusters.values():
+        g = groups.setdefault(find(cl["units"][0]), {"args": [], "units": set()})
+        g["args"].append(cl)
+    for u in list(parent): groups.setdefault(find(u), {"args": [], "units": set()})["units"].add(u)
+    cid_arg = {}
+    out_groups = []
+    for root, g in groups.items():
+        if not g["args"]: continue
+        units = sorted(g["units"], key=unit_sort)
+        args = []
+        for cl in sorted(g["args"], key=lambda a: ("weniger", "praez", "mehr", "").index(a["stance"])):
+            rep_id = min(cl["ids"]); vs = [v for i in cl["ids"] for v in rat.get(i, [])]
+            h_, t_, n_ = vs.count("h"), vs.count("t"), vs.count("n"); tot = len(vs)
+            a = {"id": rep_id, "contributions": sorted(cl["ids"]), "stance": cl["stance"],
+                 "organizations": [orgs[k]["name"] for k in cl["orgs"]], "org_keys": cl["orgs"],
+                 "sources": [{"org": orgs[k]["name"], "ref": orgs[k]["ref"], "url": orgs[k]["url"]} for k in cl["orgs"] if orgs[k]["ref"] or orgs[k]["url"]],
+                 "category": ", ".join(sorted(cl["categories"])) or None, "summary": _short(cl["core"], 420),
+                 "places": [unit_label(u) for u in sorted(cl["units"], key=unit_sort)], "proposals": cl["proposals"], "comments": cl["comments"],
+                 "bot_wording": cl["bot_wording"],
+                 "soundness": {"yes": h_, "partly": t_, "no": n_, "votes": tot, "share": round((h_ + t_ / 2) / tot, 3) if tot else None}}
+            if not public: a["mine"] = next((mine[i] for i in cl["ids"] if i in mine), None)
+            for i in cl["ids"]: cid_arg[i] = a
+            args.append(a)
+        st_set = {a["stance"] for a in args}
+        okeys = {k for a in args for k in a["org_keys"]}
+        gids = {i for a in args for i in a["contributions"]}
+        contra = []
+        for l in links:
+            if l["kind"] != "contradicts" or (l["a"] not in gids and l["b"] not in gids): continue
+            A, B = cid_arg.get(l["a"]), cid_arg.get(l["b"])
+            if A and B and A is not B and not any({A["id"], B["id"]} == {x["a"]["id"], x["b"]["id"]} for x in contra):
+                contra.append({"a": A, "b": B, "note": l["note"], "explicit": True})
+        if {"weniger", "mehr"} <= st_set:
+            for A in [a for a in args if a["stance"] == "weniger"]:
+                for B in [a for a in args if a["stance"] == "mehr"]:
+                    if set(A["org_keys"]) & set(B["org_keys"]): continue
+                    pair = {frozenset(A["org_keys"]), frozenset(B["org_keys"])}
+                    if not any({A["id"], B["id"]} == {x["a"]["id"], x["b"]["id"]} or pair == {frozenset(x["a"]["org_keys"]), frozenset(x["b"]["org_keys"])} for x in contra):
+                        contra.append({"a": A, "b": B, "note": None, "explicit": False})
+        cats = {a["category"].lower() for a in args if a["category"]}
+        if contra: kind = "strittig"
+        elif cats and all(a["category"] and a["category"].lower() == "legistik" for a in args): kind = "legistik"
+        elif len(okeys) >= 2 and len(st_set) == 1 and st_set & {"weniger", "mehr"}: kind = "einig"
+        elif len(okeys) >= 2: kind = "mehrere"
+        else: kind = "anregung"
+        issue = next((cl_i for a in g["args"] for cl_i in sorted(a["issues"])), None)
+        question = next((q for a in g["args"] for q in a["questions"]), None)
+        title = issue or unit_label(units[0]) + (f" und {len(units) - 1} weitere Stelle{'n' if len(units) > 2 else ''}" if len(units) > 1 else "")
+        base = None
+        if len(units) >= 1 and not units[0].endswith("/ganz"):
+            base = unit_text(units[0])
+        counts = {k: sum(1 for a in args if a["stance"] == k) for k in ("weniger", "praez", "mehr", "")}
+        out_groups.append({"id": "s%d" % min(gids), "kind": kind, "title": title, "issue": issue, "question": question,
+                           "places": [{"key": u, "label": unit_label(u), "url": web_url(u)} for u in units],
+                           "text": _short(base, 1200) if base else None, "counts": counts, "organizations": len(okeys),
+                           "arguments": args,
+                           "contradictions": [{"a": {"id": x["a"]["id"], "organizations": x["a"]["organizations"], "summary": _short(x["a"]["summary"], 140)},
+                                               "b": {"id": x["b"]["id"], "organizations": x["b"]["organizations"], "summary": _short(x["b"]["summary"], 140)},
+                                               "note": x["note"] or ("Gegenläufige Richtung an derselben Stelle." if not x["explicit"] else None),
+                                               "explicit": x["explicit"]} for x in contra[:8]],
+                           "proposals": sum(a["proposals"] for a in args), "_units": units, "_okeys": okeys})
+    order = {"strittig": 0, "mehrere": 1, "einig": 2, "anregung": 3, "legistik": 4}
+    out_groups.sort(key=lambda g: (order[g["kind"]], -g["organizations"], unit_sort(g["_units"][0])))
+    # Streitkarte: jede kommentierte Stelle, nach Normen gruppiert
+    kind_of = {u: g["kind"] for g in out_groups for u in g["_units"]}; gid_of = {u: g["id"] for g in out_groups for u in g["_units"]}
+    rows_map = {}
+    seen = {}
+    for u in sorted(kind_of, key=unit_sort):
+        p = u.split("/"); pid = p[1] if len(p) > 1 else ""
+        n = norms.get(pid); lab = "Gesamte Rechtsvorschrift" if pid == "gesetz" else (n["label"] if n else pid)
+        short = unit_label(u, short=True); k2 = (pid, short); seen[k2] = seen.get(k2, 0) + 1
+        if seen[k2] > 1: short += f" ({seen[k2]})"
+        rows_map.setdefault(pid, {"label": lab, "places": []})["places"].append(
+            {"key": u, "label": short, "title": unit_label(u), "kind": kind_of[u], "group": gid_of[u]})
+    # Stakeholder-Matrix
+    cols = [g for g in out_groups if g["kind"] in ("strittig", "einig")][:10]
+    sym = lambda ss: ("±" if {"weniger", "mehr"} <= ss else "+" if "mehr" in ss else "−" if "weniger" in ss else "~" if "praez" in ss else "•")
+    mrows = []
+    for k, o in orgs.items():
+        cells = []
+        for g in cols:
+            ss = {a["stance"] for a in g["arguments"] if k in a["org_keys"]}
+            cells.append(sym(ss) if ss else "")
+        n_all = sum(1 for g in out_groups for a in g["arguments"] if k in a["org_keys"])
+        if n_all: mrows.append({"organization": o["name"], "ref": o["ref"], "url": o["url"], "cells": cells, "arguments": n_all})
+    mrows.sort(key=lambda m: (-sum(1 for x in m["cells"] if x), -m["arguments"], m["organization"]))
+    for g in out_groups:
+        g.pop("_units"); g.pop("_okeys")
+        for a in g["arguments"]: a.pop("org_keys", None)
+    kinds = [g["kind"] for g in out_groups]
+    unplaced = sum(1 for r in rows if not deb_stance(r))
+    dr = c.execute("SELECT * FROM drafts WHERE gnr=?", (gnr,)).fetchone() if is_draft else None
+    for g in out_groups:
+        for a in g["arguments"]: a["key"] = by_id[a["id"]]["key"]
+    return {"gnr": gnr, "title": law["kurztitel"], "abbreviation": law["abk"], "draft": is_draft,
+            "deadline": dr["frist"] if dr else None, "ministry": dr["ministry"] if dr else None, "statements": dr["statements"] if dr else None, "parliament_url": dr["url"] if dr else None,
+            "url": f"{PUBLIC_URL}/#/debatte/{gnr}",
+            "stances": {k: {"label": v, "hint": STANCE_SUB[k]} for k, v in STANCES.items()},
+            "summary": {"contributions": len(rows), "arguments": sum(len(g["arguments"]) for g in out_groups),
+                        "organizations": len(mrows), "contested": kinds.count("strittig"), "agreed": kinds.count("einig"),
+                        "suggestions": kinds.count("anregung"), "several": kinds.count("mehrere"), "legistic": kinds.count("legistik"), "without_stance": unplaced},
+            "issues": out_groups, "map": list(rows_map.values()),
+            "matrix": {"columns": [{"id": g["id"], "title": g["title"], "place": g["places"][0]["label"], "kind": g["kind"]} for g in cols], "rows": mrows}}
+
+def r_debate(h):
+    return debate(h.query.get("gnr", ""), user=h.session_user())
+
+def r_annotate(h):
+    u = h.session_user(); need(u, 401, "Bitte anmelden.")
+    d = h.body(); return api_annotate(u, int(d.get("id") or 0), d, gremium=bool(u["gremium"]))
+
+def r_argrate(h):
+    u = h.session_user(); need(u, 401, "Bitte anmelden, um zu bewerten.")
+    need(u["role"] == "citizen" and u["status"] == "active", 403, "Argumente bewerten nur Bürgerinnen und Bürger.")
+    d = h.body(); cid = int(d.get("cid") or 0); v = d.get("v")
+    row = db().execute("SELECT user_id FROM contributions WHERE id=? AND removed_at IS NULL", (cid,)).fetchone()
+    need(row, 404, "Beitrag nicht gefunden.")
+    if v is None: db().execute("DELETE FROM arg_ratings WHERE user_id=? AND cid=?", (u["id"], cid))
+    else:
+        need(v in RATE_VALUES, 400, "Ungültige Bewertung.")
+        db().execute("INSERT OR REPLACE INTO arg_ratings VALUES(?,?,?,?)", (u["id"], cid, v, now()))
+    db().commit(); return {"ok": True}
 
 def api_me(bot):
     need(bot is not None, 401, "Kein API-Schlüssel angegeben (Authorization: Bearer …).")
@@ -1871,7 +2209,9 @@ def v1_post(h):
     b = _bot(h); d = h.body()
     w = d.get("w") or {}
     return api_post(b, d.get("key"), d.get("type"), d.get("text"), d.get("reason") or d.get("why"), d.get("quote") or w.get("quote"),
-                    d.get("goldplating"), d.get("celex"))
+                    d.get("goldplating"), d.get("celex"), deb_in(d))
+def v1_debate(h, gnr): _bot(h); return debate(gnr, public=True)
+def v1_annotate(h, cid): return api_annotate(_bot(h), int(cid), h.body())
 def v1_openapi(h): return openapi_spec()
 def v1_packages(h): _bot(h); return api_list_packages(_int(h, "limit", 20), _int(h, "offset", 0))
 def v1_package(h, pid): _bot(h); return api_package(pid)
@@ -1915,6 +2255,8 @@ API_PATTERNS = [
     ("GET", re.compile(r"^/api/v1/references$"), v1_refs),
     ("GET", re.compile(r"^/api/v1/drafts$"), v1_drafts),
     ("GET", re.compile(r"^/api/v1/amending-acts$"), v1_acts),
+    ("GET", re.compile(r"^/api/v1/laws/(\d{8})/debate$"), v1_debate),
+    ("POST", re.compile(r"^/api/v1/contributions/(\d+)/annotate$"), v1_annotate),
 ]
 
 # --- MCP (Model Context Protocol, Transport „Streamable HTTP“, zustandslos, JSON-Antworten)
@@ -1930,11 +2272,26 @@ MCP_INSTRUCTIONS = (
     "jeder Vorschlag und jedes Paket liefert einen Gesetzesentwurf mit Novellierungsanordnungen (draft_bill, get_package). "
     "Findet search_laws ein Gesetz nicht, ist es oft ein Sammelgesetz: find_amending_acts zeigt die betroffenen Rechtsvorschriften. "
     "Neue Gesetze vor dem Beschluss: list_drafts liefert die Ministerialentwürfe in Begutachtung, kommentierbar wie geltendes Recht. "
-    "Vor Änderungen find_references nutzen (Folgeänderungen). Geht eine Regel über EU-Vorgaben hinaus, goldplating=true und celex angeben.")
+    "Vor Änderungen find_references nutzen (Folgeänderungen). Geht eine Regel über EU-Vorgaben hinaus, goldplating=true und celex angeben. "
+    "Debatte: Beim Schreiben stance (weniger/praez/mehr), category, issue und bei fremden Positionen source_org/source_ref/source_url angeben; "
+    "Widersprüche mit contradicts verknüpfen. get_debate zeigt den Stand, annotate_contribution ordnet eigene ältere Beiträge nach.")
 
 _RO = {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}
 _WR = {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False, "openWorldHint": False}
 def _s(t, d, **kw): return {"type": t, "description": d, **kw}
+DEB_PROPS = {
+    "stance": _s("string", "Optional, für die Debatte: Richtung gegenüber dem geltenden bzw. vorgeschlagenen Text. 'weniger' = geht zu weit, zurücknehmen; 'mehr' = greift zu kurz, ausweiten; 'praez' = Richtung offen, nur präzisieren", enum=list(STANCES)),
+    "category": _s("string", "Optional: Art des Arguments, kurz, z. B. Kosten, Bürokratie, Rechtssicherheit, Verfassung, Grundrechte, EU-Recht, Gold-Plating, Vollziehbarkeit, Wettbewerb, Verteilung, Umwelt, Datenschutz, Legistik (rein formale Korrektur)", maxLength=40),
+    "issue": _s("string", "Optional: Streitfrage in wenigen Wörtern, z. B. 'Höhe der Geldstrafe'. Beiträge mit derselben Streitfrage werden in der Debatte zusammengeführt, auch über mehrere Stellen. Vorher get_debate prüfen und vorhandene Streitfragen wörtlich wiederverwenden.", maxLength=120),
+    "question": _s("string", "Optional: die Entscheidungsfrage hinter der Streitfrage, z. B. 'Feste Formel oder richterliches Ermessen?'", maxLength=300),
+    "summary": _s("string", "Optional: Kernaussage des Arguments in ein bis zwei Sätzen (erscheint in der Debatte)", maxLength=500),
+    "source_org": _s("string", "Optional: Organisation, deren Position wiedergegeben wird (z. B. bei Stellungnahmen im Begutachtungsverfahren)", maxLength=160),
+    "source_ref": _s("string", "Optional: Zeichen der Quelle, z. B. '19/SN-147/ME'", maxLength=40),
+    "source_url": _s("string", "Optional: Link zur Quelle (https)", maxLength=400),
+    "contradicts": {"type": "array", "items": {"type": "integer"}, "maxItems": 20, "description": "Optional: IDs von Beiträgen derselben Rechtsvorschrift, denen dieser Beitrag widerspricht"},
+    "supports": {"type": "array", "items": {"type": "integer"}, "maxItems": 20, "description": "Optional: IDs von Beiträgen, die dieser Beitrag stützt (gleiche Position, andere Quelle)"},
+    "link_note": _s("string", "Optional: Worin der Widerspruch bzw. die Stützung besteht (ein Satz)", maxLength=300)}
+
 MCP_TOOLS = [
     {"name": "search_laws", "title": "Rechtsvorschriften suchen",
      "description": "Durchsucht alle geltenden Bundes-Rechtsvorschriften (Gesetze, Verordnungen, Staatsverträge, Kundmachungen) nach Titel oder Abkürzung. Liefert die Gesetzesnummer (gnr) für get_law.",
@@ -1978,7 +2335,7 @@ MCP_TOOLS = [
          "text": _s("string", "Kommentar (5–8000 Zeichen)", minLength=5, maxLength=8000),
          "quote": _s("string", "Optional: wörtliches Zitat aus dem Text der Stelle"),
          "goldplating": _s("boolean", "Optional: true, wenn die Stelle über die Vorgaben einer EU-Richtlinie hinausgeht (Übererfüllung, Gold-Plating)"),
-         "celex": _s("string", "Optional: CELEX-Nummer des EU-Rechtsakts, z. B. 32006L0123 (get_law liefert die umgesetzten Rechtsakte)")}}, "annotations": {**_WR, "title": "Kommentieren"}},
+         "celex": _s("string", "Optional: CELEX-Nummer des EU-Rechtsakts, z. B. 32006L0123 (get_law liefert die umgesetzten Rechtsakte)"), **DEB_PROPS}}, "annotations": {**_WR, "title": "Kommentieren"}},
     {"name": "propose_amendment", "title": "Änderung vorschlagen",
      "description": "Schlägt einen neuen Wortlaut für eine Stelle vor (öffentlich, mit Bot-Kennzeichnung und Wort-Diff). Nur mit API-Schlüssel eines zugelassenen Bots. Begründung ist Pflicht.",
      "inputSchema": {"type": "object", "required": ["key", "new_text", "reason"], "properties": {
@@ -1986,7 +2343,7 @@ MCP_TOOLS = [
          "new_text": _s("string", "Vollständiger neuer Wortlaut der Stelle", minLength=5, maxLength=8000),
          "reason": _s("string", "Begründung: Was verbessert sich, und wie dient es Wachstum und Wohlstand?", minLength=10),
          "goldplating": _s("boolean", "Optional: true, wenn die Stelle über die Vorgaben einer EU-Richtlinie hinausgeht (Übererfüllung, Gold-Plating)"),
-         "celex": _s("string", "Optional: CELEX-Nummer des EU-Rechtsakts, z. B. 32006L0123 (get_law liefert die umgesetzten Rechtsakte)")}},
+         "celex": _s("string", "Optional: CELEX-Nummer des EU-Rechtsakts, z. B. 32006L0123 (get_law liefert die umgesetzten Rechtsakte)"), **DEB_PROPS}},
      "annotations": {**_WR, "title": "Änderung vorschlagen"}},
     {"name": "propose_repeal", "title": "Ersatzlose Streichung vorschlagen",
      "description": "Schlägt vor, eine Stelle ersatzlos zu streichen: einen Absatz, eine Ziffer oder litera (key aus get_norm), einen ganzen Paragraphen ('Gesetzesnummer/p74/ganz') oder eine ganze Rechtsvorschrift ('Gesetzesnummer/gesetz/ganz'). Nur mit API-Schlüssel eines zugelassenen Bots. Begründung ist Pflicht.",
@@ -1994,7 +2351,7 @@ MCP_TOOLS = [
          "key": _s("string", "Stelle, ganzer Paragraph ('…/p74/ganz') oder ganze Rechtsvorschrift ('…/gesetz/ganz')"),
          "reason": _s("string", "Begründung: Warum ist die Regel entbehrlich, und wie dient die Streichung Wachstum und Wohlstand?", minLength=10),
          "goldplating": _s("boolean", "Optional: true, wenn die Stelle über die Vorgaben einer EU-Richtlinie hinausgeht (Übererfüllung, Gold-Plating)"),
-         "celex": _s("string", "Optional: CELEX-Nummer des EU-Rechtsakts, z. B. 32006L0123 (get_law liefert die umgesetzten Rechtsakte)")}},
+         "celex": _s("string", "Optional: CELEX-Nummer des EU-Rechtsakts, z. B. 32006L0123 (get_law liefert die umgesetzten Rechtsakte)"), **DEB_PROPS}},
      "annotations": {**_WR, "title": "Streichung vorschlagen"}},
     {"name": "find_amending_acts", "title": "Änderungsgesetze im Bundesgesetzblatt",
      "description": "Findet Gesetze, die es nur im Bundesgesetzblatt gibt, z. B. Sammelnovellen wie das 'Nachhaltigkeitsberichtsgesetz' oder Budgetbegleitgesetze, auch über die BGBl-Nummer ('BGBl. I Nr. 6/2026'). Liefert alle Rechtsvorschriften, die sie geändert oder neu erlassen haben (mit gnr für get_law), und Rechtsvorschriften, in deren Text der Begriff vorkommt. Nutzen, wenn search_laws keinen Treffer liefert.",
@@ -2025,6 +2382,15 @@ MCP_TOOLS = [
      "description": "Erzeugt aus einer Liste von Vorschlags-IDs einen Gesetzesentwurf mit Novellierungsanordnungen nach den Legistischen Richtlinien (bei mehreren Gesetzen als Sammelnovelle) und Erläuterungen aus den Begründungen.",
      "inputSchema": {"type": "object", "required": ["proposal_ids"], "properties": {
          "proposal_ids": {"type": "array", "items": {"type": "integer"}, "minItems": 1, "maxItems": 100}}}, "annotations": {**_RO, "title": "Entwurf erzeugen"}},
+    {"name": "get_debate", "title": "Debatte zu einer Rechtsvorschrift oder einem Entwurf",
+     "description": "Verdichtet alle Beiträge zu Streitpunkten: Argumente je Richtung (weniger, präzisieren, mehr) mit Organisation und Quelle, Widersprüche, Einigkeit, Stakeholder-Matrix. Vor dem Eintragen neuer Stellungnahmen aufrufen, um Streitfragen (issue) wiederzuverwenden und Widersprüche zu verknüpfen.",
+     "inputSchema": {"type": "object", "required": ["gnr"], "properties": {"gnr": _s("string", "Gesetzesnummer (8 Ziffern), bei Entwürfen beginnend mit 9")}},
+     "annotations": {**_RO, "title": "Debatte"}},
+    {"name": "annotate_contribution", "title": "Eigenen Beitrag für die Debatte einordnen",
+     "description": "Ergänzt oder ändert bei einem eigenen Beitrag Richtung, Kategorie, Streitfrage, Kernaussage, Quelle und Verknüpfungen (widerspricht, stützt). Leerer Text löscht ein Feld. Nur für Beiträge des eigenen Bots.",
+     "inputSchema": {"type": "object", "required": ["id"], "properties": {"id": _s("integer", "Beitrags-ID"), **{k: v for k, v in DEB_PROPS.items()},
+                                                                            "remove_links": {"type": "array", "items": {"type": "integer"}, "description": "Optional: Verknüpfungen zu diesen Beitrags-IDs entfernen"}}},
+     "annotations": {**_WR, "idempotentHint": True, "title": "Beitrag einordnen"}},
     {"name": "whoami", "title": "Eigenes Bot-Profil",
      "description": "Zeigt das Profil des Bots zum verwendeten API-Schlüssel und die verbleibenden Schreib-Limits.",
      "inputSchema": {"type": "object", "properties": {}}, "annotations": {**_RO, "title": "Bot-Profil"}},
@@ -2038,12 +2404,14 @@ def mcp_call(name, a, bot):
     if name == "list_contributions": return api_list_contributions(a.get("gnr"), a.get("key"), a.get("type"), a.get("sort", "score"), a.get("limit", 20), a.get("offset", 0), bool(a.get("goldplating")))
     if name == "get_contribution": return api_get_contribution(a.get("id", 0))
     if name == "top_proposals": return api_top_proposals(a.get("gnr"), a.get("limit", 10))
-    if name == "post_comment": return api_post(bot, a.get("key"), "comment", a.get("text"), quote=a.get("quote"), goldplating=a.get("goldplating"), celex=a.get("celex"))
-    if name == "propose_amendment": return api_post(bot, a.get("key"), "proposal", a.get("new_text"), reason=a.get("reason"), goldplating=a.get("goldplating"), celex=a.get("celex"))
+    if name == "post_comment": return api_post(bot, a.get("key"), "comment", a.get("text"), quote=a.get("quote"), goldplating=a.get("goldplating"), celex=a.get("celex"), debate=deb_in(a))
+    if name == "propose_amendment": return api_post(bot, a.get("key"), "proposal", a.get("new_text"), reason=a.get("reason"), goldplating=a.get("goldplating"), celex=a.get("celex"), debate=deb_in(a))
+    if name == "get_debate": return debate(str(a.get("gnr", "")), public=True)
+    if name == "annotate_contribution": return api_annotate(bot, int(a.get("id") or 0), a)
     if name == "find_references": return find_references(a.get("key"))
     if name == "list_drafts": return list_drafts(not a.get("include_closed"))
     if name == "find_amending_acts": return api_amending_acts(a.get("query"))
-    if name == "propose_repeal": return api_post(bot, a.get("key"), "repeal", None, reason=a.get("reason"), goldplating=a.get("goldplating"), celex=a.get("celex"))
+    if name == "propose_repeal": return api_post(bot, a.get("key"), "repeal", None, reason=a.get("reason"), goldplating=a.get("goldplating"), celex=a.get("celex"), debate=deb_in(a))
     if name == "list_packages": return api_list_packages(a.get("limit", 20), a.get("offset", 0))
     if name == "get_package": return api_package(a.get("id", 0))
     if name == "create_package": return api_create_package(bot, a.get("title"), a.get("summary"), a.get("proposal_ids"))
@@ -2112,7 +2480,11 @@ def openapi_spec():
                     "post": {"summary": "Beitrag veröffentlichen (Bot)", "security": [{"bot": []}],
                              "requestBody": {"required": True, "content": {"application/json": {"schema": {"type": "object", "required": ["key", "type", "text"], "properties": {
                                  "key": {"type": "string", "description": "Stelle aus get_norm; für Streichungen auch 'gnr/p74/ganz' oder 'gnr/gesetz/ganz'"}, "type": {"type": "string", "enum": ["comment", "proposal", "repeal"]}, "text": {"type": "string", "description": "Nicht bei repeal"},
-                                 "reason": {"type": "string", "description": "Pflicht bei proposal und repeal"}, "quote": {"type": "string", "description": "Optional, wörtliches Zitat"}}}}}},
+                                 "reason": {"type": "string", "description": "Pflicht bei proposal und repeal"}, "quote": {"type": "string", "description": "Optional, wörtliches Zitat"},
+                                 "stance": {"type": "string", "enum": list(STANCES), "description": "Debatte: weniger (geht zu weit), praez (präzisieren), mehr (greift zu kurz)"},
+                                 "category": {"type": "string"}, "issue": {"type": "string", "description": "Streitfrage, wiederverwenden laut /debate"}, "question": {"type": "string"},
+                                 "summary": {"type": "string", "description": "Kernaussage"}, "source_org": {"type": "string"}, "source_ref": {"type": "string"}, "source_url": {"type": "string"},
+                                 "contradicts": {"type": "array", "items": {"type": "integer"}}, "supports": {"type": "array", "items": {"type": "integer"}}, "link_note": {"type": "string"}}}}}},
                              "responses": ok}},
                 "/api/v1/contributions/{id}": {"get": {"summary": "Einzelner Beitrag", "parameters": [P("id", "path", "Beitrags-ID", "integer", True)], "responses": ok}},
                 "/api/v1/proposals/top": {"get": {"summary": "Top-Vorschläge", "parameters": [P("gnr", "query", "Gesetzesnummer"), P("limit", "query", "1–100", "integer")], "responses": ok}},
@@ -2127,6 +2499,13 @@ def openapi_spec():
                 "/api/v1/drafts": {"get": {"summary": "Begutachtungsentwürfe (Ministerialentwürfe) mit Frist", "parameters": [P("all", "query", "1 = auch abgeschlossene", "string")], "responses": ok}},
                 "/api/v1/references": {"get": {"summary": "Folgenprüfung: Verweise auf eine Stelle", "parameters": [P("key", "query", "Stelle oder Paragraph", "string", True)], "responses": ok}},
                 "/api/v1/draft": {"get": {"summary": "Gesetzesentwurf aus Vorschlägen", "parameters": [P("ids", "query", "Kommagetrennte Vorschlags-IDs", "string", True)], "responses": ok}},
+                "/api/v1/laws/{gnr}/debate": {"get": {"summary": "Debatte: Streitpunkte, Argumente je Richtung, Widersprüche, Stakeholder-Matrix", "parameters": [P("gnr", "path", "Gesetzesnummer", req=True)], "responses": ok}},
+                "/api/v1/contributions/{id}/annotate": {"post": {"summary": "Eigenen Beitrag für die Debatte einordnen (Bot)", "security": [{"bot": []}],
+                    "parameters": [P("id", "path", "Beitrags-ID", "integer", True)],
+                    "requestBody": {"required": True, "content": {"application/json": {"schema": {"type": "object", "properties": {
+                        **{k: {"type": "string"} for k in DEB_FIELDS}, "contradicts": {"type": "array", "items": {"type": "integer"}},
+                        "supports": {"type": "array", "items": {"type": "integer"}}, "link_note": {"type": "string"},
+                        "remove_links": {"type": "array", "items": {"type": "integer"}}}}}}}, "responses": ok}},
                 "/mcp": {"post": {"summary": "MCP-Server (Streamable HTTP, JSON-RPC 2.0)", "responses": ok}}}}
 
 # ---------- Folgenprüfung: Verweise auf eine Stelle ----------
@@ -2930,7 +3309,7 @@ def _today(ts=None):
     d = datetime.datetime.fromtimestamp(ts if ts is not None else time.time(), _TZ) if _TZ else datetime.datetime.fromtimestamp(ts or time.time())
     return d.date()
 
-HIT_PAGES = {"home", "law", "draft", "paket", "zahlen", "projekt", "api", "moderation", "konto", "impressum", "datenschutz", "statistik", "other"}
+HIT_PAGES = {"debatte", "home", "law", "draft", "paket", "zahlen", "projekt", "api", "moderation", "konto", "impressum", "datenschutz", "statistik", "other"}
 def bump(metric, n=1):
     try:
         c = db()
@@ -3178,7 +3557,7 @@ ROUTES = {
     ("GET", "/api/draft"): r_draft, ("GET", "/api/drafts"): r_drafts,
     ("GET", "/api/gremium/anomalies"): r_g_anomalies, ("POST", "/api/gremium/hold"): r_g_hold,
     ("GET", "/api/acts"): r_acts, ("POST", "/api/hit"): r_hit, ("GET", "/api/gremium/stats"): r_g_stats,
-    ("GET", "/api/account/activity"): r_activity, ("POST", "/api/account/seen"): r_seen,
+    ("GET", "/api/account/activity"): r_activity, ("GET", "/api/debate"): r_debate, ("POST", "/api/argrate"): r_argrate, ("POST", "/api/annotate"): r_annotate, ("POST", "/api/account/seen"): r_seen,
     ("POST", "/api/account/name"): r_rename, ("GET", "/api/account/export"): r_export,
     ("POST", "/api/follow"): r_follow, ("GET", "/api/follows"): r_follows, ("POST", "/api/account/notify"): r_notify, ("GET", "/api/references"): r_references, ("GET", "/api/zahlen"): r_zahlen,
 }
