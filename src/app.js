@@ -80,6 +80,7 @@ async function route(){
     if (!S.all) await loadAll().catch(()=>{});
     render(); if (fresh || !S.deb) { await loadDebate(); render(); }
     if (fresh) window.scrollTo(0,0);
+    if (S.debFocus){ const f = S.debFocus; S.debFocus = null; debGo(f); }
     hit("debatte", p[1]); return;
   }
   if (["impressum","datenschutz","reset","api","projekt","moderation","paket","zahlen","konto","gremium"].includes(p[0])){
@@ -285,7 +286,8 @@ function draftCard(d){
     <div class="chead"><span class="pill pkg">${esc(d.nr)}</span><span class="vfy">${esc(d.ressort||"")}</span>${left!==null?`<span class="pill ${left<=3?"s-umstritten":"s-diskutiert"}">${left<0?"Frist abgelaufen":left===0?"Frist endet heute":`noch ${left} ${left===1?"Tag":"Tage"}`}</span>`:""}</div>
     <a class="paddr" href="${d.url ? "#/g/"+d.gnr : esc(d.parliament_url)}">${esc(d.title)}</a>
     <div class="why">Begutachtung bis ${fmtIso(d.deadline)} · ${esc(d.ministry||"")}</div>
-    <div class="why">${d.contributions ? `${d.contributions} ${d.contributions===1?"Beitrag":"Beiträge"} hier · <a href="#/debatte/${d.gnr}">Debatte</a>` : "Noch keine Beiträge hier"} · ${d.statements_parliament} Stellungnahmen beim Parlament</div>
+    <div class="why">${d.contributions ? `${d.contributions} ${d.contributions===1?"Beitrag":"Beiträge"} hier` : "Noch keine Beiträge hier"} · ${d.statements_parliament} Stellungnahmen beim Parlament</div>
+    ${d.url ? `<div class="row">${d.contributions ? `<a class="btn" href="#/debatte/${d.gnr}">Debatte ansehen</a>` : ""}<a class="btn ghost" href="#/g/${d.gnr}">Entwurf lesen</a></div>` : ""}
   </article>`;
 }
 function pkgCard(p){
@@ -358,7 +360,7 @@ function renderHome(){
   </div>
   ${(S.drafts||[]).length ? `<section class="hprops" id="home-drafts" aria-labelledby="h-drafts">
     <div class="hprops-head"><h2 id="h-drafts">Neues Recht in Begutachtung</h2>
-      <span class="why">${S.drafts.length} Gesetzesentwürfe der Ministerien. Bis zum Ende der Frist kann jede und jeder Stellung nehmen, hier Absatz für Absatz.</span></div>
+      <span class="why">${S.drafts.length} Gesetzesentwürfe der Ministerien. Bis zum Ende der Frist kann jede und jeder Stellung nehmen, hier Absatz für Absatz. Die Debatte zeigt, wer welche Position vertritt.</span></div>
     <div class="pgrid">${S.drafts.slice(0, S.draftsAll ? 99 : 6).map(draftCard).join("")}</div>
     ${S.drafts.length > 6 && !S.draftsAll ? `<button class="linkbtn strong" id="draftsall">Alle ${S.drafts.length} Entwürfe</button>` : ""}
   </section>` : ""}
@@ -1493,6 +1495,7 @@ document.addEventListener("input", e => {
   if (e.target.id==="tocq"){ S.tocq = e.target.value; const pos = e.target.selectionStart; renderToc(); const n=$("tocq"); n.focus(); n.setSelectionRange(pos,pos); }
 });
 document.addEventListener("click", e => {
+  const df = e.target.closest("a[data-debfocus]"); if (df) S.debFocus = df.dataset.debfocus;
   const ks = e.target.closest("a[data-ksecgo]"); if (ks) S.kontoSec = ks.dataset.ksecgo;
   const n = e.target.closest("a[data-nav]");
   if (n){

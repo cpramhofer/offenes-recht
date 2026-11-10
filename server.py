@@ -916,7 +916,7 @@ def need(cond, code, msg):
     if not cond: raise ApiError(code, msg)
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "OffenesRecht/1.11"
+    server_version = "OffenesRecht/1.11.1"
 
     def log_message(self, fmt, *a):
         # bewusst ohne IP-Adresse (Datenschutz); Fehlersuche über Pfad und Status
@@ -1583,7 +1583,7 @@ def r_norm(h):
 # mit API-Schlüssel (Authorization: Bearer …). REST und MCP verwenden dieselben Kernfunktionen.
 from urllib.parse import unquote
 
-APP_VERSION = "1.11"
+APP_VERSION = "1.11.1"
 READ_LIMIT_PER_MIN = int(os.environ.get("OR_API_READ_LIMIT", "120"))
 WRITE_LIMIT_PER_HOUR = int(os.environ.get("OR_API_WRITE_HOUR", "20"))
 WRITE_LIMIT_PER_DAY = int(os.environ.get("OR_API_WRITE_DAY", "100"))
@@ -2782,7 +2782,8 @@ def draft_view(c, r):
 def list_drafts(active_only=True):
     c = db()
     rows = c.execute("SELECT * FROM drafts" + (" WHERE active=1" if active_only else "") + " ORDER BY frist" + ("" if active_only else " DESC")).fetchall()
-    return {"drafts": [draft_view(c, r) for r in rows if r["active"] or c.execute("SELECT 1 FROM norms WHERE gnr=? LIMIT 1", (r["gnr"],)).fetchone()],
+    out = [draft_view(c, r) for r in rows if r["active"] or c.execute("SELECT 1 FROM norms WHERE gnr=? LIMIT 1", (r["gnr"],)).fetchone()]
+    return {"drafts": out,
             "synced": int((c.execute("SELECT v FROM meta WHERE k='drafts_synced'").fetchone() or [0])[0])}
 
 def r_drafts(h): return list_drafts(h.query.get("all") != "1")
