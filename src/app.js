@@ -969,12 +969,14 @@ function debGo(id){
   const el = document.getElementById("deb-"+id); if (el) el.scrollIntoView({behavior:"smooth", block:"start"});
 }
 const orgsTxt = a => a.organizations.join(", ");
-function debArg(a){
+function debArg(a, g){
+  const ws = (g.contradictions||[]).filter(w => w.explicit && (w.a.id===a.id || w.b.id===a.id))
+    .map(w => { const o = w.a.id===a.id ? w.b : w.a; return `<div class="dwid"><b>Widerspricht ${esc(o.organizations.join(", "))}</b>${w.note?`: ${esc(w.note)}`:""}</div>`; }).join("");
   const sv = a.soundness, share = sv.votes ? Math.round(sv.share*100)+" % stichhaltig · " : "";
   const RB = [["h","Ja"],["t","Teilweise"],["n","Nein"]];
   return `<div class="darg">
     <div class="dorg"><b>${esc(orgsTxt(a))}</b>${a.category?`<span class="chip static">${esc(a.category)}</span>`:""}</div>
-    <p>${esc(a.summary)}</p>
+    <p>${esc(a.summary)}</p>${ws}
     <div class="dsrc why">${a.sources.map(s => s.url ? `<a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.ref||"Quelle")}</a>` : esc(s.ref||"")).join(" · ")}
       ${a.places.length>1?`<span>betrifft ${a.places.length} Stellen</span>`:""}
       <span>${a.contributions.length===1?"1 Beitrag":a.contributions.length+" Beiträge, zusammengefasst"}</span>
@@ -1001,11 +1003,7 @@ function debIssue(g, st){
       ${g.text ? `<div><div class="lbl">Text${S.deb.draft?" des Entwurfs":""} · ${esc(g.places[0].label)}</div><p class="dtext">${esc(g.text)}</p></div>` : ""}
       <div class="dcols">${cols.map(k => { const as = g.arguments.filter(a => a.stance===k);
         return `<div class="dcol"><div class="dside s-${k||"offen"}"><b>${k ? esc(st[k].label) : "Richtung nicht angegeben"} · ${as.length}</b><span>${k ? esc(st[k].hint) : "noch nicht eingeordnet"}</span></div>
-          ${as.length ? as.map(debArg).join("") : `<div class="dempty why">Keine Position in diese Richtung.</div>`}</div>`; }).join("")}</div>
-      ${g.contradictions.length ? `<div class="dcontra"><b>Widersprüche</b>${g.contradictions.map(w => `<div class="dpair">
-          <div><b>${esc(w.a.organizations.join(", "))}</b><span>${esc(w.a.summary)}</span></div><span class="dvs" aria-label="widerspricht">↔</span>
-          <div><b>${esc(w.b.organizations.join(", "))}</b><span>${esc(w.b.summary)}</span></div>
-          ${w.note?`<p>${w.explicit?"<b>Worin:</b> ":""}${esc(w.note)}</p>`:""}</div>`).join("")}</div>` : ""}
+          ${as.length ? as.map(a => debArg(a, g)).join("") : `<div class="dempty why">Keine Position in diese Richtung.</div>`}</div>`; }).join("")}</div>
       <div class="dfoot">${g.question?`<div><div class="lbl">Zu entscheiden</div><div class="dq">${esc(g.question)}</div></div>`:"<div></div>"}
         <a class="btn" href="#/g/${esc(g.places[0].key)}">${g.proposals ? `Vorschläge an der Stelle vergleichen (${g.proposals})` : "Zur Stelle"}</a></div>
     </div>` : ""}

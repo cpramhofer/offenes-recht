@@ -399,3 +399,5 @@ dialog.sharedlg .why{margin:10px 0 0}
 .debatte .dmx thead th .linkbtn{text-align:left;font-weight:600}
 /* 1.12 Link zur Debatte auf den Entwurfskarten */
 .drcard .row{display:flex;gap:8px;flex-wrap:wrap;margin-top:4px}
+.debatte .dwid{font-size:12.5px;background:#FDF5F6;border:1px solid #F0C9CF;border-radius:6px;padding:6px 8px}
+.debatte .dwid b{color:#8A0E22}
