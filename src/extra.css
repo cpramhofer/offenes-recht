@@ -408,3 +408,8 @@ dialog.sharedlg .why{margin:10px 0 0}
 .drsub{font-size:17px;margin:26px 0 2px;display:flex;gap:8px;align-items:baseline}
 .drsubp{margin:0 0 10px;max-width:90ch}
 .drseg{margin:0 0 12px;flex-wrap:wrap}
+/* 1.13 E-Mail-Bestätigung */
+.vbar{background:#FDF0D5;border-top:1px solid #E8D3A6;font-size:13px}
+.vbar .wrap{padding:8px 24px}
+.vbar strong{color:#7A4700}
+.kbox.vbox{border-color:#E8D3A6;background:#FFFBF2}

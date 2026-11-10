@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS contributions(
   via TEXT DEFAULT 'web', created INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS ix_contrib_key ON contributions(key);
 CREATE TABLE IF NOT EXISTS ratings(user_id INTEGER, cid INTEGER, v TEXT, created INTEGER, PRIMARY KEY(user_id, cid));
+CREATE TABLE IF NOT EXISTS email_tokens(token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL, email TEXT, created INTEGER, expires INTEGER);
 CREATE TABLE IF NOT EXISTS arg_ratings(user_id INTEGER, cid INTEGER, v TEXT, created INTEGER, PRIMARY KEY(user_id, cid));
 CREATE TABLE IF NOT EXISTS contribution_links(a INTEGER NOT NULL, b INTEGER NOT NULL, kind TEXT NOT NULL, note TEXT, user_id INTEGER, created INTEGER,
   PRIMARY KEY(a, b, kind));
@@ -147,6 +148,10 @@ def init_db(seed=True):
     if "stance" not in cols:                                             # Debatte: Richtung, Kategorie, Streitfrage, Quelle
         for col in ("stance TEXT", "category TEXT", "issue TEXT", "question TEXT", "summary TEXT", "src_org TEXT", "src_ref TEXT", "src_url TEXT"):
             c.execute("ALTER TABLE contributions ADD COLUMN " + col)
+    ucols2 = [r[1] for r in c.execute("PRAGMA table_info(users)")]
+    if "email_verified" not in ucols2:                                   # Bestätigung der E-Mail-Adresse; bestehende Konten gelten als bestätigt
+        c.execute("ALTER TABLE users ADD COLUMN email_verified INTEGER DEFAULT 0")
+        c.execute("UPDATE users SET email_verified=1")
     dcols = [r[1] for r in c.execute("PRAGMA table_info(drafts)")]
     if "stage" not in dcols:                                             # Stand des Gesetzgebungsverfahrens nach der Begutachtung
         for col in ("stage TEXT", "stage_note TEXT", "rv TEXT", "rv_url TEXT", "bgbl TEXT", "inkraft TEXT", "stage_checked INTEGER"):
@@ -272,7 +277,7 @@ def public_user(r):
 
 def me_view(r):
     u = public_user(r)
-    u.update({"email": r["email"], "gremium": bool(r["gremium"])})
+    u.update({"email": r["email"], "gremium": bool(r["gremium"]), "email_verified": bool(r["email_verified"])})
     if r["role"] == "bot" and r["api_key_once"]:
         u["api_key_once"] = r["api_key_once"]
     u["can_post"] = r["status"] == "active"
@@ -1048,6 +1053,10 @@ class Handler(BaseHTTPRequestHandler):
                 need(self.headers.get("X-OR") == "1", 403, "Fehlender Anfrage-Header.")
             route = ROUTES.get((method, path))
             need(route is not None, 404, "Unbekannter Endpunkt.")
+            if method == "POST" and path in VERIFY_REQUIRED:
+                su = self.session_user()
+                if su and not su["email_verified"]:
+                    raise ApiError(403, "Bitte bestätigen Sie zuerst Ihre E-Mail-Adresse. Den Link haben wir an " + su["email"] + " geschickt; unter „Mein Konto“ können Sie ihn erneut anfordern.")
             result = route(self)
             if isinstance(result, tuple): self.send_json(200, result[0], result[1])
             else: self.send_json(200, result)
@@ -1095,7 +1104,46 @@ def r_register(h):
                      vals["bot_mandate"], vals["bot_operator"], vals["bot_model"], now()))
     c.execute("UPDATE users SET consent_at=?, consent_version=? WHERE id=?", (now(), CONSENT_VERSION, cur.lastrowid))
     log(cur.lastrowid, "register", cur.lastrowid, role); c.commit()
+    try: send_verification(cur.lastrowid)
+    except Exception as e: sys.stderr.write("Bestätigungsmail an Konto %d: %r\n" % (cur.lastrowid, e))
     return start_session(h, cur.lastrowid)
+
+VERIFY_HOURS = 72
+def send_verification(uid):
+    u = db().execute("SELECT * FROM users WHERE id=?", (uid,)).fetchone()
+    token = secrets.token_urlsafe(32)
+    db().execute("INSERT INTO email_tokens VALUES(?,?,?,?,?)", (sha(token), uid, u["email"], now(), now() + VERIFY_HOURS * 3600)); db().commit()
+    kind = {"citizen": "Ihr Bürgerkonto", "org": "das Konto Ihrer Organisation", "bot": "das Konto Ihres KI-Bots"}.get(u["role"], "Ihr Konto")
+    send_mail(u["email"], "Offenes Recht: Bitte E-Mail-Adresse bestätigen",
+              f"Hallo {u['name']},\n\nSie haben {kind} „{u['name']}“ bei Offenes Recht angelegt. Bitte bestätigen Sie Ihre E-Mail-Adresse über diesen Link:\n\n"
+              f"{PUBLIC_URL}/#/bestaetigen/{token}\n\nDer Link ist {VERIFY_HOURS} Stunden gültig. Erst nach der Bestätigung können Sie Beiträge schreiben, bewerten und Inhalten folgen.\n\n"
+              f"Wenn Sie sich nicht registriert haben, ignorieren Sie diese Nachricht.\n\nOffenes Recht\n{PUBLIC_URL}\n")
+
+def r_verify_email(h):
+    t = (h.body().get("token") or "").strip(); c = db()
+    r = c.execute("SELECT * FROM email_tokens WHERE token_hash=?", (sha(t),)).fetchone()
+    need(r and r["expires"] > now(), 400, "Der Bestätigungslink ist ungültig oder abgelaufen. Nach der Anmeldung können Sie unter „Mein Konto“ einen neuen anfordern.")
+    u = c.execute("SELECT * FROM users WHERE id=? AND status!='deleted'", (r["user_id"],)).fetchone()
+    need(u and u["email"] == r["email"], 400, "Dieser Link gehört zu einer anderen E-Mail-Adresse.")
+    c.execute("UPDATE users SET email_verified=1 WHERE id=?", (u["id"],)); c.execute("DELETE FROM email_tokens WHERE user_id=?", (u["id"],))
+    log(u["id"], "email-verified", u["id"], None); c.commit()
+    return {"ok": True, "name": u["name"], "role": KIND_OUT.get(u["role"], u["role"])}
+
+def r_verify_resend(h):
+    u = h.session_user(); need(u, 401, "Bitte anmelden.")
+    need(not u["email_verified"], 400, "Ihre E-Mail-Adresse ist bereits bestätigt.")
+    n = db().execute("SELECT COUNT(*) FROM email_tokens WHERE user_id=? AND created>?", (u["id"], now() - 3600)).fetchone()[0]
+    need(n < 3, 429, "Es wurden gerade mehrere Links verschickt. Bitte in einer Stunde erneut versuchen.")
+    try: send_verification(u["id"])
+    except ApiError: raise
+    except Exception as e:
+        sys.stderr.write("Bestätigungsmail an Konto %d: %r\n" % (u["id"], e))
+        raise ApiError(502, "Die E-Mail konnte gerade nicht versendet werden. Bitte später erneut versuchen.")
+    return {"ok": True, "email": u["email"]}
+
+# Schreiben, Bewerten, Folgen, Melden erst nach bestätigter E-Mail-Adresse
+VERIFY_REQUIRED = {"/api/contributions", "/api/ratings", "/api/pairwise", "/api/report", "/api/packages", "/api/package/update", "/api/package/add",
+                   "/api/package/rate", "/api/argrate", "/api/annotate", "/api/follow", "/api/account/notify"}
 
 def start_session(h, uid):
     token = secrets.token_urlsafe(32)
@@ -1466,7 +1514,7 @@ def r_reset(h):
     r = db().execute("SELECT * FROM resets WHERE token_hash=? AND used=0 AND expires>?", (sha(token), now())).fetchone()
     need(r, 400, "Der Link ist abgelaufen oder wurde schon verwendet. Bitte einen neuen anfordern.")
     c = db()
-    c.execute("UPDATE users SET pw_hash=? WHERE id=?", (hash_pw(pw), r["user_id"]))
+    c.execute("UPDATE users SET pw_hash=?, email_verified=1 WHERE id=?", (hash_pw(pw), r["user_id"]))   # Link per Mail belegt die Adresse
     c.execute("UPDATE resets SET used=1 WHERE user_id=?", (r["user_id"],))
     c.execute("DELETE FROM sessions WHERE user_id=?", (r["user_id"],))
     log(r["user_id"], "password-reset", r["user_id"]); c.commit()
@@ -1587,7 +1635,7 @@ def r_norm(h):
 # mit API-Schlüssel (Authorization: Bearer …). REST und MCP verwenden dieselben Kernfunktionen.
 from urllib.parse import unquote
 
-APP_VERSION = "1.12"
+APP_VERSION = "1.13"
 READ_LIMIT_PER_MIN = int(os.environ.get("OR_API_READ_LIMIT", "120"))
 WRITE_LIMIT_PER_HOUR = int(os.environ.get("OR_API_WRITE_HOUR", "20"))
 WRITE_LIMIT_PER_DAY = int(os.environ.get("OR_API_WRITE_DAY", "100"))
@@ -1798,6 +1846,7 @@ def _resolve_key(key):
 def _need_bot(bot):
     need(bot is not None, 401, "Schreiben erfordert den API-Schlüssel eines zugelassenen Bots (Authorization: Bearer …).")
     need(bot["role"] == "bot" and bot["status"] == "active", 403, "Dieser Bot ist nicht zugelassen.")
+    need(bot["email_verified"], 403, "Die E-Mail-Adresse dieses Bot-Kontos ist noch nicht bestätigt.")
 
 def api_post(bot, key, type, text, reason=None, quote=None, goldplating=False, celex=None, debate=None):
     _need_bot(bot); gp = {"gold": bool(goldplating), "celex": celex, **(debate or {})}
@@ -3618,6 +3667,7 @@ ROUTES = {
     ("POST", "/api/register"): r_register, ("POST", "/api/login"): r_login, ("POST", "/api/logout"): r_logout,
     ("POST", "/api/ack-key"): r_ack_key,
     ("POST", "/api/reset-request"): r_reset_request, ("POST", "/api/reset"): r_reset,
+    ("POST", "/api/verify-email"): r_verify_email, ("POST", "/api/verify-resend"): r_verify_resend,
     ("POST", "/api/account/password"): r_change_pw, ("POST", "/api/account/delete"): r_delete_account,
     ("POST", "/api/contributions"): r_contribute, ("POST", "/api/ratings"): r_rate, ("POST", "/api/pairwise"): r_pair,
     ("GET", "/api/gremium/pending"): r_g_pending, ("POST", "/api/gremium/decide"): r_g_decide, ("POST", "/api/gremium/limit"): r_g_limit, ("POST", "/api/gremium/profile"): r_g_profile, ("POST", "/api/gremium/moderate"): r_g_moderate,

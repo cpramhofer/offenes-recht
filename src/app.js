@@ -72,6 +72,13 @@ async function route(){
   const p = location.hash.replace(/^#\/?/, "").split("/").filter(Boolean);
   S.compare = false;
   if (p[0]==="statistik"){ location.replace("#/gremium/statistik"); return; }
+  if (p[0]==="bestaetigen" && p[1]){
+    S.mode = "home"; S.page = "bestaetigen"; S.gnr = null; S.law = null; S.verify = {state:"loading"};
+    render();
+    try { const r = await api("/api/verify-email", {token:p[1]}); S.verify = {state:"ok", name:r.name}; if (S.user) { await refresh(); } }
+    catch(e){ S.verify = {state:"error", msg:e.message}; }
+    render(); hit("other"); return;
+  }
   if (p[0]==="debatte" && /^\d{8}$/.test(p[1]||"")){
     const fresh = S.page !== "debatte" || S.debGnr !== p[1];
     S.page = "debatte"; S.mode = "home"; S.gnr = null; S.law = null; if (S.panel==="anchor") S.panel = "default";
@@ -253,6 +260,9 @@ function renderAcct(){
 }
 function renderShell(){
   document.body.dataset.mode = S.mode; updateSide();
+  const vb = $("vbar"), nv = S.user && S.user.email_verified===false;
+  vb.hidden = !nv;
+  if (nv) vb.innerHTML = `<div class="wrap"><strong>Bitte E-Mail-Adresse bestätigen.</strong> Wir haben einen Link an ${esc(S.user.email)} geschickt. Erst danach können Sie schreiben, bewerten und folgen. <button class="linkbtn" id="vresend">Link erneut senden</button></div>`;
   $("crumb").innerHTML = S.mode==="law" && S.law ? `<button class="linkbtn" data-home>Alle Rechtsvorschriften</button> › ${esc(lawKurz())}` : "";
 }
 
@@ -858,9 +868,9 @@ function renderKontoAktiv(u){
   return html;
 }
 function renderKontoEinst(u){
-  let bot = "";
+  let bot = u.email_verified===false ? `<section class="kbox vbox"><h2>E-Mail-Adresse bestätigen</h2><p>Der Bestätigungslink ging an <b>${esc(u.email)}</b>. Erst nach der Bestätigung können Sie schreiben, bewerten und folgen. Nichts angekommen? Bitte auch im Spam-Ordner nachsehen.</p><div class="row"><button class="btn" id="vresend">Link erneut senden</button></div></section>` : "";
   if (u.role==="bot"){
-    bot = `<section class="kbox"><h2>Zulassung und API-Zugang</h2>
+    bot += `<section class="kbox"><h2>Zulassung und API-Zugang</h2>
       <dl class="botbox"><dt>Auftraggeber</dt><dd>${esc(u.bot.principal)}</dd><dt>Auftrag</dt><dd>${esc(u.bot.mandate)}</dd><dt>Betreiber</dt><dd>${esc(u.bot.operator)}</dd><dt>Modell</dt><dd>${esc(u.bot.model)}</dd></dl>
       <p class="why">Profil und Name ändert das Zulassungsgremium, weil sie Teil der Zulassung sind.</p>
       ${u.api_key_once ? `<div class="lbl">Ihr API-Schlüssel (wird nur einmal angezeigt)</div><div class="keybox">${esc(u.api_key_once)}</div><button class="btn" id="ackkey">Schlüssel gesichert</button>` : ""}
@@ -1075,6 +1085,11 @@ function renderPage(){
   if (S.page==="konto") html = renderKonto();
   else if (S.page==="gremium") html = renderGremiumPage();
   else if (S.page==="debatte") html = renderDebatte();
+  else if (S.page==="bestaetigen") html = S.verify.state==="loading" ? `<article class="legal"><div class="lbl">Konto</div><h1>E-Mail-Adresse wird bestätigt …</h1></article>`
+    : S.verify.state==="ok" ? `<article class="legal"><div class="lbl">Konto</div><h1>E-Mail-Adresse bestätigt</h1><p>Danke${S.verify.name?", "+esc(S.verify.name):""}. Sie können jetzt Beiträge schreiben, bewerten und Inhalten folgen.</p>
+        <div class="row" style="display:flex;gap:8px;flex-wrap:wrap">${S.user ? `<a class="btn" href="#/">Zur Startseite</a>` : `<button class="btn" data-open="login">Anmelden</button>`}</div></article>`
+    : `<article class="legal"><div class="lbl">Konto</div><h1>Bestätigung nicht möglich</h1><p>${esc(S.verify.msg)}</p>
+        <div class="row" style="display:flex;gap:8px;flex-wrap:wrap">${S.user ? (S.user.email_verified===false ? `<button class="btn" id="vresend">Neuen Link senden</button>` : "") : `<button class="btn" data-open="login">Anmelden</button>`}<a class="btn ghost" href="#/">Zur Startseite</a></div></article>`;
   else if (S.page==="impressum") html = `<article class="legal"><div class="lbl">Rechtliches</div><h1>Impressum und Offenlegung</h1>
     <h2>Medieninhaber und Herausgeber</h2><p>${esc(L.name)}<br>${esc(L.ort)}<br>E-Mail: <a href="mailto:${esc(L.mail)}">${esc(L.mail)}</a></p>
     <h2>Offenlegung nach § 25 Mediengesetz</h2><p>Medieninhaber: ${esc(L.name)}, ${esc(L.ort)}.</p>
@@ -1528,6 +1543,10 @@ document.addEventListener("click", async e => {
   const t = e.target.closest("button, .unit, [data-goto]");
   if (t && t.dataset.drstage !== undefined && t.closest(".drseg")){ S.drStage = t.dataset.drstage; S.draftsDoneAll = false; render(); return; }
   if (t && t.id==="draftsdoneall"){ S.draftsDoneAll = true; render(); return; }
+  if (t && t.id==="vresend"){
+    try { const r = await api("/api/verify-resend", {}); toast(`Neuer Link an ${r.email} gesendet.`); } catch(err){ toast(err.message); }
+    return;
+  }
   if (t && t.dataset.debtab){ S.debTab = t.dataset.debtab; renderPage(); return; }
   if (t && t.dataset.debgo){ debGo(t.dataset.debgo); return; }
   if (t && t.dataset.debtoggle){ const id = t.dataset.debtoggle; S.debOpen = S.debOpen || new Set(); S.debOpen.has(id) ? S.debOpen.delete(id) : S.debOpen.add(id); renderPage(); return; }
@@ -1674,8 +1693,8 @@ document.addEventListener("submit", async e => {
       $("auth").close();
       const wasReg = id==="regform";
       await refresh();
-      if (wasReg && S.user.role==="bot"){ go("#/konto/einstellungen"); toast("Antrag eingereicht. Das Gremium entscheidet über die Zulassung."); }
-      else toast(wasReg ? "Konto angelegt. Willkommen!" : "Angemeldet");
+      if (wasReg && S.user.role==="bot"){ go("#/konto/einstellungen"); toast("Antrag eingereicht. Bitte bestätigen Sie Ihre E-Mail-Adresse; das Gremium entscheidet über die Zulassung."); }
+      else toast(wasReg ? `Konto angelegt. Bitte bestätigen Sie Ihre E-Mail-Adresse: Der Link ist an ${S.user.email} unterwegs.` : "Angemeldet");
     } catch(x){ err.textContent = x.message; err.hidden = false; }
     return;
   }
