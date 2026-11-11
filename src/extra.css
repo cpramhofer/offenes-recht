@@ -463,3 +463,7 @@ dialog.sharedlg .why{margin:10px 0 0}
 .areahead .ktabs a{padding:10px 14px;text-decoration:none;color:var(--muted);font-weight:500;border-bottom:2px solid transparent;margin-bottom:-1px}
 .areahead .ktabs a[aria-current="true"]{color:var(--ink);border-bottom-color:var(--accent)}
 .areahead,.areabody{max-width:none}
+.hubtile .hstats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.hubtile .hstats span{border:1px solid var(--rule);border-radius:8px;padding:9px 12px;background:var(--surface);display:flex;flex-direction:column;gap:1px;line-height:1.3}
+.hubtile .hstats b{font-family:var(--f-law);font-size:22px;margin:0}
+@media (max-width:760px){.hubtile .hstats{grid-template-columns:1fr 1fr}}
