@@ -413,3 +413,53 @@ dialog.sharedlg .why{margin:10px 0 0}
 .vbar .wrap{padding:8px 24px}
 .vbar strong{color:#7A4700}
 .kbox.vbox{border-color:#E8D3A6;background:#FFFBF2}
+/* 2.0 Bereiche, Startseite, Stellungnehmer */
+.mainnav a[aria-current="page"]{color:var(--ink);font-weight:600;box-shadow:inset 0 -2px 0 var(--accent)}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
+.hub{display:flex;flex-direction:column;gap:22px;max-width:1180px;margin:0 auto;padding:6px 0 30px}
+.hubhead h1{font-family:var(--f-law);font-size:34px;line-height:1.15;margin:4px 0 8px;letter-spacing:-.01em}
+.hubhead .lead{font-size:16px;line-height:1.6;max-width:70ch;margin:0 0 14px;color:var(--ink)}
+.hubsearch{display:flex;gap:8px;max-width:720px}
+.hubsearch input{flex:1;min-width:0;border:1px solid var(--rule);border-radius:6px;padding:11px 12px;font:inherit}
+.hubgrid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+.hubtile{display:flex;flex-direction:column;gap:8px;border:1px solid var(--rule);border-radius:12px;background:var(--surface);padding:22px 24px;text-decoration:none;color:var(--ink)}
+.hubtile:hover{border-color:var(--accent);text-decoration:none}
+.hubtile h2{font-family:var(--f-law);font-size:26px;margin:0}
+.hubtile p{margin:0;color:var(--muted);line-height:1.55}
+.hubtile .hstats{display:flex;gap:16px;flex-wrap:wrap;font-size:13px;color:var(--muted);margin-top:4px}
+.hubtile .hstats b{font-size:20px;color:var(--ink);font-weight:600;margin-right:3px}
+.hubtile .go{margin-top:auto;font-weight:600;color:var(--accent)}
+.hubtile .go::after{content:" →"}
+.hubabout{display:grid;grid-template-columns:minmax(0,1.3fr) minmax(0,1fr);gap:24px;border-top:1px solid var(--rule);padding-top:20px}
+.hubabout h2{font-size:18px;margin:0 0 6px}
+.hubabout p{margin:0 0 8px;line-height:1.6;color:var(--muted)}
+.areahead{max-width:1180px;margin:0 auto 6px}
+.areahead h1{font-family:var(--f-law);font-size:30px;margin:2px 0 4px}
+.areahead .why{max-width:90ch;margin:0 0 6px}
+.areahead .ktabs{margin-top:8px}
+.areabody{max-width:1180px;margin:0 auto}
+.homegrid.one{grid-template-columns:minmax(0,1fr)}
+.cath{font-family:var(--f-law);font-size:22px;margin:4px 0 8px}
+.debcard .ddstats{display:flex;gap:14px;flex-wrap:wrap;font-size:13px;color:var(--muted)}
+.debcard .ddstats b{font-size:18px;color:var(--ink);margin-right:2px}
+.debcard .ddstats .hot b{color:var(--accent)}
+.debcard .ddtop{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:8px}
+.debcard .ddtop a{font-weight:600;color:var(--ink);font-size:13.5px}
+.debcard .row{display:flex;gap:8px;flex-wrap:wrap;margin-top:auto}
+.dbar.mini{display:flex;height:6px;border-radius:3px;overflow:hidden;background:#EEF0F3;width:100%;margin-top:3px}
+.dbar.mini i{display:block;height:100%}
+.dbar.mini .s-weniger{background:#C8701E}.dbar.mini .s-praez{background:#8A93A3}.dbar.mini .s-mehr{background:#2F6DB5}.dbar.mini .s-offen{background:#DCE0E7}
+.shq{border:1px solid var(--rule);border-radius:6px;padding:9px 12px;font:inherit;width:100%;max-width:420px;margin:4px 0 10px}
+.shtable th[scope=row],.sntable th[scope=row]{text-transform:none;letter-spacing:0;font-size:13.5px;font-weight:500;color:var(--ink);text-align:left}
+.shtable th[scope=row] a,.sntable th[scope=row] a{color:var(--ink)}
+.stakeholder .shlist{list-style:none;margin:0;padding:0}
+.stakeholder .shlist li{border-bottom:1px solid var(--rule);padding:12px 0;display:flex;flex-direction:column;gap:3px}
+.stakeholder .claim{margin-top:18px}
+.pill.sn{background:#EEF0F3;color:#4A5263}
+.chead .capt{font-size:12px}
+.gsub{font-size:16px;margin:22px 0 4px}
+@media (max-width:760px){.hubgrid,.hubabout{grid-template-columns:1fr}.hubhead h1{font-size:26px}.hubsearch{flex-direction:column}}
+.areahead .ktabs{display:flex;gap:4px;border-bottom:1px solid var(--rule);margin:8px 0 18px;overflow-x:auto;scrollbar-width:none;white-space:nowrap}
+.areahead .ktabs a{padding:10px 14px;text-decoration:none;color:var(--muted);font-weight:500;border-bottom:2px solid transparent;margin-bottom:-1px}
+.areahead .ktabs a[aria-current="true"]{color:var(--ink);border-bottom-color:var(--accent)}
+.areahead,.areabody{max-width:none}

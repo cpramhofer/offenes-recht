@@ -5,7 +5,7 @@ Start:   python3 server.py serve [--port 8790] [--db /var/lib/offenes-recht/app.
 Gremium: python3 server.py gremium-add <email>     (macht ein bestehendes Konto zum Gremiumsmitglied)
          python3 server.py user-add <email> <name> (legt ein Bürgerkonto an, Passwort wird abgefragt)
 """
-import argparse, getpass, hashlib, hmac, json, math, os, re, secrets, sqlite3, sys, threading, time
+import argparse, getpass, hashlib, hmac, html, json, math, os, re, secrets, sqlite3, sys, threading, time
 from http import cookies
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.parse import urlparse
@@ -38,6 +38,11 @@ CREATE TABLE IF NOT EXISTS contributions(
   via TEXT DEFAULT 'web', created INTEGER NOT NULL);
 CREATE INDEX IF NOT EXISTS ix_contrib_key ON contributions(key);
 CREATE TABLE IF NOT EXISTS ratings(user_id INTEGER, cid INTEGER, v TEXT, created INTEGER, PRIMARY KEY(user_id, cid));
+CREATE TABLE IF NOT EXISTS stakeholders(id INTEGER PRIMARY KEY, key TEXT UNIQUE NOT NULL, name TEXT NOT NULL, kind TEXT NOT NULL,
+  created INTEGER, claimed_by INTEGER, claim_status TEXT, claim_note TEXT, claim_at INTEGER);
+CREATE TABLE IF NOT EXISTS statements(nr TEXT PRIMARY KEY, gnr TEXT NOT NULL, stakeholder_id INTEGER, sender TEXT, unit TEXT, date TEXT,
+  url TEXT, n INTEGER, seen INTEGER, public INTEGER DEFAULT 1);
+CREATE INDEX IF NOT EXISTS statements_gnr ON statements(gnr);
 CREATE TABLE IF NOT EXISTS email_tokens(token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL, email TEXT, created INTEGER, expires INTEGER);
 CREATE TABLE IF NOT EXISTS arg_ratings(user_id INTEGER, cid INTEGER, v TEXT, created INTEGER, PRIMARY KEY(user_id, cid));
 CREATE TABLE IF NOT EXISTS contribution_links(a INTEGER NOT NULL, b INTEGER NOT NULL, kind TEXT NOT NULL, note TEXT, user_id INTEGER, created INTEGER,
@@ -152,7 +157,13 @@ def init_db(seed=True):
     if "email_verified" not in ucols2:                                   # Bestätigung der E-Mail-Adresse; bestehende Konten gelten als bestätigt
         c.execute("ALTER TABLE users ADD COLUMN email_verified INTEGER DEFAULT 0")
         c.execute("UPDATE users SET email_verified=1")
+    if "sn_nr" not in [r[1] for r in c.execute("PRAGMA table_info(contributions)")]:   # Zuordnung zu Stellungnahmen (14/SN-147/ME)
+        c.execute("ALTER TABLE contributions ADD COLUMN sn_nr TEXT")
+        for r in c.execute("SELECT id, why, src_ref FROM contributions WHERE key LIKE '9%'").fetchall():
+            refs = [r["src_ref"]] if r["src_ref"] and SN_RE.fullmatch(r["src_ref"]) else SN_RE.findall(r["why"] or "")
+            if refs: c.execute("UPDATE contributions SET sn_nr=? WHERE id=?", (", ".join(dict.fromkeys(refs)), r["id"]))
     dcols = [r[1] for r in c.execute("PRAGMA table_info(drafts)")]
+    if "sn_checked" not in dcols: c.execute("ALTER TABLE drafts ADD COLUMN sn_checked INTEGER")
     if "stage" not in dcols:                                             # Stand des Gesetzgebungsverfahrens nach der Begutachtung
         for col in ("stage TEXT", "stage_note TEXT", "rv TEXT", "rv_url TEXT", "bgbl TEXT", "inkraft TEXT", "stage_checked INTEGER"):
             c.execute("ALTER TABLE drafts ADD COLUMN " + col)
@@ -368,7 +379,7 @@ def serialize(rows, stats, users):
                     "author": users.get(r["user_id"]), "example": bool(r["example"]), "via": r["via"], "base": r["base_text"],
                     "where": key_label(db(), r["key"]), "op": r["op"], "amend": amend_for(db(), r),
                     "gold": {"celex": r["celex"], "url": eurlex(r["celex"]) if r["celex"] else None} if r["gold"] else None,
-                    "created": r["created"], "stats": stats[r["id"]]})
+                    "created": r["created"], "stats": stats[r["id"]], "on_behalf": on_behalf(db(), r)})
     return res
 
 def all_users(c):
@@ -382,6 +393,7 @@ import urllib.request, urllib.parse, xml.etree.ElementTree as ET, datetime
 from concurrent.futures import ThreadPoolExecutor
 
 RIS_API = "https://data.bka.gv.at/ris/api/v2.6/Bundesrecht"
+SN_RE = re.compile(r"\d+/SN-\d+/ME")
 RIS_UA = "OffenesRecht/1 (+" + os.environ.get("OR_PUBLIC_URL", "https://offenesrecht.at") + ")"
 RIS_DELAY = float(os.environ.get("OR_RIS_DELAY", "0.4"))   # Pause zwischen Anfragen im Hintergrund
 PILOT_GNR = "10007517"   # Gewerbeordnung 1994
@@ -925,7 +937,7 @@ def need(cond, code, msg):
     if not cond: raise ApiError(code, msg)
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "OffenesRecht/1.12"
+    server_version = "OffenesRecht/2.0"
 
     def log_message(self, fmt, *a):
         # bewusst ohne IP-Adresse (Datenschutz); Fehlersuche über Pfad und Status
@@ -1229,6 +1241,8 @@ def create_contribution(u, d, via):
                           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                        (key, typ, text, why or None, wq, w.get("from") if wq else None, w.get("to") if wq else None, u["id"], via, now(), base, op, gold, celex))
     cid = cur.lastrowid
+    sn = sn_refs(meta.get("src_ref"), why)
+    if sn: meta["sn_nr"] = sn
     if meta: db().execute("UPDATE contributions SET " + ",".join(k + "=?" for k in meta) + " WHERE id=?", (*meta.values(), cid))
     for kind, other, note in links: deb_link(cid, other, kind, note, u["id"])
     db().commit()
@@ -1302,7 +1316,10 @@ def r_g_pending(h):
                      "type": cr["type"], "text": cr["text"][:600],
                      "author": (au["name"] + (" (KI-Bot)" if au["role"] == "bot" else "")) if au else "", "first": r["first"]})
     c.commit()
-    return {"pending": [full(r) for r in pend], "bots": [lim(r) for r in active], "reports": reps, "reasons": REMOVE_REASONS,
+    claims = [{"id": k["id"], "name": k["name"], "note": k["claim_note"], "at": k["claim_at"],
+               "account": full(c.execute("SELECT * FROM users WHERE id=?", (k["claimed_by"],)).fetchone())}
+              for k in c.execute("SELECT * FROM stakeholders WHERE claim_status='pending' ORDER BY claim_at")]
+    return {"pending": [full(r) for r in pend], "claims": claims, "bots": [lim(r) for r in active], "reports": reps, "reasons": REMOVE_REASONS,
             "defaults": {"per_hour": WRITE_LIMIT_PER_HOUR, "per_day": WRITE_LIMIT_PER_DAY},
             "history": [{"action": r["action"].split(":")[1], "target": r["tname"], "by": r["gname"], "note": r["note"], "at": r["created"]} for r in hist]}
 
@@ -1635,7 +1652,7 @@ def r_norm(h):
 # mit API-Schlüssel (Authorization: Bearer …). REST und MCP verwenden dieselben Kernfunktionen.
 from urllib.parse import unquote
 
-APP_VERSION = "1.13"
+APP_VERSION = "2.0"
 READ_LIMIT_PER_MIN = int(os.environ.get("OR_API_READ_LIMIT", "120"))
 WRITE_LIMIT_PER_HOUR = int(os.environ.get("OR_API_WRITE_HOUR", "20"))
 WRITE_LIMIT_PER_DAY = int(os.environ.get("OR_API_WRITE_DAY", "100"))
@@ -1792,6 +1809,8 @@ def api_contribution(r, st, users, c):
     if r["gold"]: out["goldplating"] = {"celex": r["celex"], "url": eurlex(r["celex"]) if r["celex"] else None}
     dv = deb_out(c, r)
     if dv: out["debate"] = dv
+    ob = on_behalf(c, r)
+    if ob: out["on_behalf"] = [{k: v for k, v in x.items() if k != "claimed"} for x in ob]
     return out
 
 def _contrib_rows(gnr=None, key=None):
@@ -1876,8 +1895,13 @@ STANCES = {"weniger": "Zurücknehmen", "praez": "Präzisieren", "mehr": "Ausweit
 STANCE_SUB = {"weniger": "Geht zu weit", "praez": "Richtung offen, Wortlaut ändern", "mehr": "Greift zu kurz", "": "Richtung nicht angegeben"}
 DEB_FIELDS = {"stance": ("stance", 10), "category": ("category", 40), "issue": ("issue", 120), "question": ("question", 300),
               "summary": ("summary", 500), "source_org": ("src_org", 160), "source_ref": ("src_ref", 40), "source_url": ("src_url", 400)}
-LINK_KINDS = ("contradicts", "supports")
+LINK_KINDS = ("contradicts", "supports", "responds_to")   # responds_to: die Stellungnahme geht ausdrücklich auf eine andere ein
 _SRC_RE = re.compile(r"(?:Stakeholder:\s*|\);\s*)(.+?)\s*\((\d+/SN-\d+/ME),\s*(https?://[^\s)]+)\)")
+
+def sn_refs(src_ref, why):
+    """Stellungnahmen-Nummern eines Beitrags: aus source_ref, sonst aus der Begründung."""
+    refs = SN_RE.findall(src_ref or "") or SN_RE.findall(why or "")
+    return ", ".join(dict.fromkeys(refs)) or None
 
 def deb_in(d):
     """Debattenfelder aus einer API-/MCP-Anfrage (nur vorhandene Schlüssel)."""
@@ -1927,6 +1951,7 @@ def api_annotate(u, cid, d, gremium=False):
     links = deb_links_in(d, gnr)
     rm = d.get("remove_links") or []
     need(meta or links or rm, 400, "Nichts zu ändern: stance, category, issue, question, summary, source_*, contradicts, supports oder remove_links angeben.")
+    if "src_ref" in meta: meta["sn_nr"] = sn_refs(meta["src_ref"], r["why"])
     if meta: db().execute("UPDATE contributions SET " + ",".join(k + "=?" for k in meta) + " WHERE id=?", (*meta.values(), cid))
     for kind, other, note in links: deb_link(cid, other, kind, note, u["id"])
     for x in rm:
@@ -1992,6 +2017,43 @@ def _short(t, n=160):
     t = re.sub(r"\s+", " ", t or "").strip()
     return t if len(t) <= n else t[:n].rsplit(" ", 1)[0] + " …"
 
+def draft_places(units, erl=False):
+    """Einheitliche Zitierweise der Stellen eines Entwurfs (Legistische Richtlinien):
+    Artikel „Art. 2“, Novellierungsanordnung „Z 11“, betroffene Bestimmung „§ 423 Abs. 2“; Erläuterungen „Erl. zu Art. 2 Z 11“."""
+    out, art, art_title, z_para, sect = {}, None, {}, {}, None
+    for u in units:
+        n, t = (u.get("n") or "").strip(), (u.get("t") or "").strip()
+        if not n:
+            m = re.match(r"^(?:Zu\s+)?Art(?:ikel|\.)\s*(\d+[a-z]?)\b", t)
+            if m: art = "Art. " + m.group(1); sect = None
+            elif art and art not in art_title and not erl and t: art_title[art] = t.rstrip(":")
+            elif erl and t and not t.startswith("Zu "): sect = t.rstrip(":"); art = None if t in ("Allgemeiner Teil", "Erläuterungen", "Kompetenzgrundlage") else art
+            out[u["a"]] = {"art": art, "short": "Überschrift" if art else (sect or "Titel"), "full": (art + " · Überschrift") if art else (sect or "Titel"), "heading": True}
+            continue
+        if erl:
+            m = re.match(r"^Zu\s+Z\s*(\d+[a-z]?)\s*(?:\((.*)\))?:?$", n)
+            if m:
+                inner = (m.group(2) or "").replace("„neu“", "").strip()
+                short = "Z " + m.group(1) + (f" ({inner})" if inner.startswith("§") else "")
+                out[u["a"]] = {"art": art, "short": short, "full": "Erl. zu " + ((art + " ") if art else "") + short}
+            else:
+                lab = n.rstrip(":"); out[u["a"]] = {"art": None, "short": lab, "full": "Erl., " + lab}
+            continue
+        parts = [x.strip() for x in n.split(" · ")]
+        a_ = next((x for x in parts if x.startswith("Art.")), art); art = a_ or art
+        zm = next((re.match(r"^Pkt\.\s*(\S+)", x) for x in parts if x.startswith("Pkt.")), None)
+        z = ("Z " + zm.group(1)) if zm else None
+        bez = next((x for x in parts if x.startswith("§") or x.startswith("Abs.")), None)
+        if z and (art, z) not in z_para:
+            pm = (re.search(r"folgende[rn]?\s+(?:neue[rn]?\s+)?(§\s*\d+[a-z]*)", t) or re.search(r"(§§?\s*\d+[a-z]*)", t))
+            z_para[(art, z)] = re.sub(r"\s+", " ", pm.group(1).replace("§§", "§")) if pm else None
+        para = z_para.get((art, z)) if z else None
+        if bez and bez.startswith("Abs.") and para: bez = para + " " + bez
+        short = bez or (f"{z} ({para})" if z and para else z) or n
+        full = " ".join(x for x in (art, z) if x) + (f" ({bez})" if bez and z else ((" · " + bez) if bez else ""))
+        out[u["a"]] = {"art": art, "short": short, "full": full or n}
+    return out, art_title
+
 def debate(gnr, user=None, public=False):
     c = db(); need(re.fullmatch(r"\d{8}", gnr or ""), 400, "gnr: Gesetzesnummer mit 8 Ziffern.")
     law = c.execute("SELECT gnr, kurztitel, abk, tgroup FROM laws WHERE gnr=?", (gnr,)).fetchone()
@@ -2000,10 +2062,14 @@ def debate(gnr, user=None, public=False):
     users = all_users(c); is_draft = law["tgroup"] == "me"
     # Reihenfolge der Stellen: Norm, dann Einheit im Normtext
     norms = {r["pid"]: r for r in c.execute("SELECT pid, label, sort, body FROM norms WHERE gnr=?", (gnr,))}
-    upos, ulab = {}, {}
+    upos, ulab, places, art_titles = {}, {}, {}, {}
     for pid, n in norms.items():
         units = json.loads(n["body"])["units"] if n["body"] else []
         for i, u in enumerate(units): upos[(pid, u["a"])] = i; ulab[(pid, u["a"])] = u["n"]
+        if is_draft:
+            pl, at = draft_places(units, erl=(pid == "erl"))
+            for a, v in pl.items(): places[(pid, a)] = v
+            if pid != "erl": art_titles.update(at)
     def unit_of(key): p = key.split("/"); return "/".join(p[:3]) if len(p) >= 3 else key
     def unit_sort(uk):
         p = uk.split("/"); n = norms.get(p[1]) if len(p) > 1 else None
@@ -2014,9 +2080,10 @@ def debate(gnr, user=None, public=False):
         n = norms.get(p[1]) if len(p) > 1 else None; a = "/".join(p[2:])
         if a == "ganz": return (n["label"] if n else p[1]) + " (gesamt)"
         if is_draft:
-            lab = ulab.get((p[1], a)) or ""
-            full = ((n["label"] + " · ") if n and p[1] != "text" else "") + lab
-            return (lab.split(" · ")[-1] or lab or a) if short else full
+            pl = places.get((p[1], a))
+            if pl: return pl["short"] if short else pl["full"]
+            lab = ulab.get((p[1], a)) or a
+            return lab
         lab = key_label(c, uk); abk = (law["abk"] or law["kurztitel"]) + " "
         lab = lab[len(abk):] if lab.startswith(abk) else lab
         return lab
@@ -2031,6 +2098,14 @@ def debate(gnr, user=None, public=False):
     mine = {x["cid"]: x["v"] for x in c.execute("SELECT cid, v FROM arg_ratings WHERE user_id=?", (user["id"],))} if user else {}
     orgs = {}
     def org_of(r):
+        ob = on_behalf(c, r)
+        if ob:
+            res = []
+            for o in ob:
+                k = ("sh:%d" % o["stakeholder_id"]) if o["stakeholder_id"] else ("sn:" + o["statement"])
+                orgs.setdefault(k, {"key": k, "name": o["name"], "ref": o["statement"], "url": o["url"], "stakeholder_id": o["stakeholder_id"], "kind": o["kind"]})
+                res.append(k)
+            return res
         src = deb_source(r)
         if src:
             res = []
@@ -2091,6 +2166,9 @@ def debate(gnr, user=None, public=False):
                  "category": ", ".join(sorted(cl["categories"])) or None, "summary": _short(cl["core"], 420),
                  "places": [unit_label(u) for u in sorted(cl["units"], key=unit_sort)], "proposals": cl["proposals"], "comments": cl["comments"],
                  "bot_wording": cl["bot_wording"],
+                 "captured_by": sorted({(users.get(by_id[i]["user_id"]) or {}).get("name") for i in cl["ids"]
+                                        if (users.get(by_id[i]["user_id"]) or {}).get("role") == "bot" and by_id[i]["sn_nr"]} - {None}),
+                 "stakeholder_ids": [orgs[k].get("stakeholder_id") for k in cl["orgs"] if orgs[k].get("stakeholder_id")],
                  "soundness": {"yes": h_, "partly": t_, "no": n_, "votes": tot, "share": round((h_ + t_ / 2) / tot, 3) if tot else None}}
             if not public: a["mine"] = next((mine[i] for i in cl["ids"] if i in mine), None)
             for i in cl["ids"]: cid_arg[i] = a
@@ -2128,24 +2206,35 @@ def debate(gnr, user=None, public=False):
                            "places": [{"key": u, "label": unit_label(u), "url": web_url(u)} for u in units],
                            "text": _short(base, 1200) if base else None, "counts": counts, "organizations": len(okeys),
                            "arguments": args,
-                           "contradictions": [{"a": {"id": x["a"]["id"], "organizations": x["a"]["organizations"], "summary": _short(x["a"]["summary"], 140)},
-                                               "b": {"id": x["b"]["id"], "organizations": x["b"]["organizations"], "summary": _short(x["b"]["summary"], 140)},
+                           "contradictions": [{"a": {"id": x["a"]["id"], "organizations": x["a"]["organizations"], "stakeholder_ids": x["a"]["stakeholder_ids"], "summary": _short(x["a"]["summary"], 140)},
+                                               "b": {"id": x["b"]["id"], "organizations": x["b"]["organizations"], "stakeholder_ids": x["b"]["stakeholder_ids"], "summary": _short(x["b"]["summary"], 140)},
                                                "note": x["note"] or ("Gegenläufige Richtung an derselben Stelle." if not x["explicit"] else None),
                                                "explicit": x["explicit"]} for x in contra[:8]],
                            "proposals": sum(a["proposals"] for a in args), "_units": units, "_okeys": okeys})
+    for g in out_groups:                                       # ausdrückliche Bezugnahmen erst nach allen Gruppen auflösen
+        for a in g["arguments"]:
+            a["responds_to"] = [{"id": cid_arg[l["b"]]["id"], "organizations": cid_arg[l["b"]]["organizations"], "note": l["note"]}
+                                for l in links if l["kind"] == "responds_to" and l["a"] in a["contributions"] and l["b"] in cid_arg]
     order = {"strittig": 0, "mehrere": 1, "einig": 2, "anregung": 3, "legistik": 4}
     out_groups.sort(key=lambda g: (order[g["kind"]], -g["organizations"], unit_sort(g["_units"][0])))
     # Streitkarte: jede kommentierte Stelle, nach Normen gruppiert
     kind_of = {u: g["kind"] for g in out_groups for u in g["_units"]}; gid_of = {u: g["id"] for g in out_groups for u in g["_units"]}
     rows_map = {}
-    seen = {}
+    sev = {"strittig": 0, "mehrere": 1, "einig": 2, "anregung": 3, "legistik": 4}
     for u in sorted(kind_of, key=unit_sort):
         p = u.split("/"); pid = p[1] if len(p) > 1 else ""
         n = norms.get(pid); lab = "Gesamte Rechtsvorschrift" if pid == "gesetz" else (n["label"] if n else pid)
-        short = unit_label(u, short=True); k2 = (pid, short); seen[k2] = seen.get(k2, 0) + 1
-        if seen[k2] > 1: short += f" ({seen[k2]})"
-        rows_map.setdefault(pid, {"label": lab, "places": []})["places"].append(
-            {"key": u, "label": short, "title": unit_label(u), "kind": kind_of[u], "group": gid_of[u]})
+        pl = places.get((pid, "/".join(p[2:]))) if is_draft else None
+        art = pl["art"] if pl else None
+        if is_draft and pid == "erl": lab = ("Erläuterungen zu " + art) if art else "Erläuterungen"
+        elif is_draft and art: lab = art + ((" · " + art_titles[art]) if art_titles.get(art) else "")
+        row = rows_map.setdefault((pid, art), {"label": lab, "places": []})
+        short = unit_label(u, short=True)
+        same = next((x for x in row["places"] if x["label"] == short), None)
+        if same:                                                   # mehrere Absätze derselben Stelle: ein Feld, die schärfere Einstufung zählt
+            if sev[kind_of[u]] < sev[same["kind"]]: same.update(kind=kind_of[u], group=gid_of[u], key=u)
+            continue
+        row["places"].append({"key": u, "label": short, "title": unit_label(u), "kind": kind_of[u], "group": gid_of[u]})
     # Stakeholder-Matrix
     cols = [g for g in out_groups if g["kind"] in ("strittig", "einig")][:10]
     sym = lambda ss: ("±" if {"weniger", "mehr"} <= ss else "+" if "mehr" in ss else "−" if "weniger" in ss else "~" if "praez" in ss else "•")
@@ -2264,6 +2353,9 @@ def v1_post(h):
     return api_post(b, d.get("key"), d.get("type"), d.get("text"), d.get("reason") or d.get("why"), d.get("quote") or w.get("quote"),
                     d.get("goldplating"), d.get("celex"), deb_in(d))
 def v1_debate(h, gnr): _bot(h); return debate(gnr, public=True)
+def v1_statements(h, gnr): _bot(h); return statements_of(gnr, public=True)
+def v1_stakeholders(h): _bot(h); return stakeholders_list()
+def v1_stakeholder(h, sid): _bot(h); return stakeholder_view(int(sid))
 def v1_annotate(h, cid): return api_annotate(_bot(h), int(cid), h.body())
 def v1_openapi(h): return openapi_spec()
 def v1_packages(h): _bot(h); return api_list_packages(_int(h, "limit", 20), _int(h, "offset", 0))
@@ -2309,6 +2401,9 @@ API_PATTERNS = [
     ("GET", re.compile(r"^/api/v1/drafts$"), v1_drafts),
     ("GET", re.compile(r"^/api/v1/amending-acts$"), v1_acts),
     ("GET", re.compile(r"^/api/v1/laws/(\d{8})/debate$"), v1_debate),
+    ("GET", re.compile(r"^/api/v1/drafts/(\d{8})/statements$"), v1_statements),
+    ("GET", re.compile(r"^/api/v1/stakeholders$"), v1_stakeholders),
+    ("GET", re.compile(r"^/api/v1/stakeholders/(\d+)$"), v1_stakeholder),
     ("POST", re.compile(r"^/api/v1/contributions/(\d+)/annotate$"), v1_annotate),
 ]
 
@@ -2326,7 +2421,8 @@ MCP_INSTRUCTIONS = (
     "Findet search_laws ein Gesetz nicht, ist es oft ein Sammelgesetz: find_amending_acts zeigt die betroffenen Rechtsvorschriften. "
     "Neue Gesetze vor dem Beschluss: list_drafts liefert die Ministerialentwürfe in Begutachtung, kommentierbar wie geltendes Recht. "
     "Vor Änderungen find_references nutzen (Folgeänderungen). Geht eine Regel über EU-Vorgaben hinaus, goldplating=true und celex angeben. "
-    "Debatte: Beim Schreiben stance (weniger/praez/mehr), category, issue und bei fremden Positionen source_org/source_ref/source_url angeben; "
+    "Debatte: Beim Schreiben stance (weniger/praez/mehr), category, issue und bei fremden Positionen source_org/source_ref/source_url angeben "
+    "(source_ref = Nummer der Stellungnahme laut list_statements; der Beitrag erscheint dann unter dem Stellungnehmer); "
     "Widersprüche mit contradicts verknüpfen. get_debate zeigt den Stand, annotate_contribution ordnet eigene ältere Beiträge nach.")
 
 _RO = {"readOnlyHint": True, "destructiveHint": False, "idempotentHint": True, "openWorldHint": False}
@@ -2343,6 +2439,7 @@ DEB_PROPS = {
     "source_url": _s("string", "Optional: Link zur Quelle (https)", maxLength=400),
     "contradicts": {"type": "array", "items": {"type": "integer"}, "maxItems": 20, "description": "Optional: IDs von Beiträgen derselben Rechtsvorschrift, denen dieser Beitrag widerspricht"},
     "supports": {"type": "array", "items": {"type": "integer"}, "maxItems": 20, "description": "Optional: IDs von Beiträgen, die dieser Beitrag stützt (gleiche Position, andere Quelle)"},
+    "responds_to": {"type": "array", "items": {"type": "integer"}, "maxItems": 20, "description": "Optional: nur wenn die Stellungnahme selbst ausdrücklich auf diese anderen Beiträge bzw. Stellungnahmen eingeht (z. B. 'Entgegen der Ansicht der WKO …'). Wird in der Debatte als Hinweis am Argument gezeigt; bloß gegenläufige Positionen ergeben sich schon aus der Richtung."},
     "link_note": _s("string", "Optional: Worin der Widerspruch bzw. die Stützung besteht (ein Satz)", maxLength=300)}
 
 MCP_TOOLS = [
@@ -2439,6 +2536,10 @@ MCP_TOOLS = [
      "description": "Verdichtet alle Beiträge zu Streitpunkten: Argumente je Richtung (weniger, präzisieren, mehr) mit Organisation und Quelle, Widersprüche, Einigkeit, Stakeholder-Matrix. Vor dem Eintragen neuer Stellungnahmen aufrufen, um Streitfragen (issue) wiederzuverwenden und Widersprüche zu verknüpfen.",
      "inputSchema": {"type": "object", "required": ["gnr"], "properties": {"gnr": _s("string", "Gesetzesnummer (8 Ziffern), bei Entwürfen beginnend mit 9")}},
      "annotations": {**_RO, "title": "Debatte"}},
+    {"name": "list_statements", "title": "Stellungnahmen zu einem Entwurf",
+     "description": "Alle beim Parlament eingebrachten Stellungnahmen zu einem Begutachtungsentwurf: Nummer (z. B. 14/SN-147/ME), Stellungnehmer, Datum, Link und wie viele Beiträge dazu schon erfasst sind. Beim Erfassen einer Stellungnahme die Nummer als source_ref angeben; der Beitrag erscheint dann unter dem Stellungnehmer, mit dem Hinweis, dass der Bot ihn erfasst hat.",
+     "inputSchema": {"type": "object", "required": ["gnr"], "properties": {"gnr": _s("string", "Gesetzesnummer des Entwurfs (8 Ziffern, beginnt mit 9)")}},
+     "annotations": {**_RO, "title": "Stellungnahmen"}},
     {"name": "annotate_contribution", "title": "Eigenen Beitrag für die Debatte einordnen",
      "description": "Ergänzt oder ändert bei einem eigenen Beitrag Richtung, Kategorie, Streitfrage, Kernaussage, Quelle und Verknüpfungen (widerspricht, stützt). Leerer Text löscht ein Feld. Nur für Beiträge des eigenen Bots.",
      "inputSchema": {"type": "object", "required": ["id"], "properties": {"id": _s("integer", "Beitrags-ID"), **{k: v for k, v in DEB_PROPS.items()},
@@ -2460,6 +2561,7 @@ def mcp_call(name, a, bot):
     if name == "post_comment": return api_post(bot, a.get("key"), "comment", a.get("text"), quote=a.get("quote"), goldplating=a.get("goldplating"), celex=a.get("celex"), debate=deb_in(a))
     if name == "propose_amendment": return api_post(bot, a.get("key"), "proposal", a.get("new_text"), reason=a.get("reason"), goldplating=a.get("goldplating"), celex=a.get("celex"), debate=deb_in(a))
     if name == "get_debate": return debate(str(a.get("gnr", "")), public=True)
+    if name == "list_statements": return statements_of(str(a.get("gnr", "")), public=True)
     if name == "annotate_contribution": return api_annotate(bot, int(a.get("id") or 0), a)
     if name == "find_references": return find_references(a.get("key"))
     if name == "list_drafts": return list_drafts(not a.get("include_closed"))
@@ -2857,6 +2959,196 @@ def sync_draft_stages(c, limit=60):
         c.commit(); n += 1; time.sleep(1)
     return n
 
+# ---------- Stellungnehmer und Stellungnahmen (Parlament, Liste 142) ----------
+_ORG_WORDS = re.compile(r"(?i)verband|verein|kammer|gesellschaft|gmbh|\bag\b|amt|bund|ministerium|\bbm\b|institut|plattform|gericht|anwalt|initiative|stiftung|"
+                        r"rat\b|forum|netzwerk|zentrum|universität|hochschule|schule|kirche|caritas|diakonie|partei|klub|gemeinde|stadt|land|behörde|"
+                        r"büro|vereinigung|allianz|union|akademie|komitee|kommission|dienst|gewerkschaft|arbeitsgemeinschaft|\bev\b|e\.v\.|club|österreich")
+_TITLE = re.compile(r"^(?:(?:Mag|Dr|DI|Dipl\.-Ing|Ing|Prof|MMag|DDr|BSc|MSc|BA|MA|Univ\.-Prof)\.?(?:\(FH\))?\s+)+")
+def sender_kind(name):
+    if re.match(r"(?i)nicht[- ]öffentliche", name): return "hidden"
+    if _ORG_WORDS.search(name): return "org"
+    n = _TITLE.sub("", name).strip()
+    if re.fullmatch(r"[A-ZÄÖÜ][\wäöüß'’-]+,\s*[A-ZÄÖÜ][\wäöüß'’.-]+(?:\s+[A-ZÄÖÜ][\wäöüß'’.-]+){0,3}", n): return "person"
+    if _TITLE.match(name) or re.search(r",\s*(?:MES|MA|BA|MSc|BSc|LL\.M\.|MBA|PhD)\b", name): return "person"
+    return "org"
+
+def stakeholder_key(name, kind):
+    base = re.sub(r"\s+", " ", name.split(";")[0]).strip()
+    return ("person:" if kind == "person" else "org:") + base.lower().replace("–", "-")
+
+def stakeholder_for(c, name, kind):
+    base = re.sub(r"\s+", " ", name.split(";")[0]).strip(); key = stakeholder_key(name, kind)
+    r = c.execute("SELECT id FROM stakeholders WHERE key=?", (key,)).fetchone()
+    if r: return r["id"]
+    return c.execute("INSERT INTO stakeholders(key,name,kind,created) VALUES(?,?,?,?)", (key, base, kind, now())).lastrowid
+
+def sync_statements(c, d):
+    """Liste der Stellungnahmen eines Entwurfs; nicht mehr gelistete werden ausgeblendet (z. B. auf Wunsch gelöscht)."""
+    j = json.loads(_parl_get("/Filter/api/filter/data/142?js=eval&showAll=true", {"BEZUG_GP_CODE": [d["gp"]], "BEZUG_ITYP": ["ME"], "BEZUG_INR": [int(d["inr"])]}))
+    h = [x["label"] for x in j["header"]]; seen = set()
+    for row in j["rows"]:
+        r = dict(zip(h, row))
+        m = re.search(r'href="([^"]+)"[^>]*>(.*?)</a>', r.get("Von") or "", re.S)
+        if not m: continue
+        txt = html.unescape(re.sub(r"<[^>]+>", "", m.group(2))).strip()
+        nr = r.get("Nr") or (SN_RE.search(txt).group(0) if SN_RE.search(txt) else None)
+        if not nr: continue
+        sender = re.sub(r"\s*\(" + re.escape(nr) + r"\)\s*$", "", txt).strip()
+        kind = sender_kind(sender)
+        sid = None if kind == "hidden" else stakeholder_for(c, sender, kind)
+        unit = sender.split(";", 1)[1].strip() if ";" in sender else None
+        dt = r.get("Datum"); iso_d = _iso(dt) if dt else None
+        try: n = int(nr.split("/")[0])
+        except ValueError: n = None
+        c.execute("""INSERT INTO statements(nr,gnr,stakeholder_id,sender,unit,date,url,n,seen,public) VALUES(?,?,?,?,?,?,?,?,?,1)
+                     ON CONFLICT(nr) DO UPDATE SET stakeholder_id=excluded.stakeholder_id, sender=excluded.sender, unit=excluded.unit,
+                     date=excluded.date, url=excluded.url, seen=excluded.seen, public=1""",
+                  (nr, d["gnr"], sid, sender if kind != "hidden" else None, unit, iso_d, PARL + m.group(1), n, now()))
+        seen.add(nr)
+    if seen:
+        q = ",".join("?" * len(seen))
+        c.execute(f"UPDATE statements SET public=0 WHERE gnr=? AND nr NOT IN ({q})", (d["gnr"], *seen))
+    c.execute("UPDATE drafts SET sn_checked=? WHERE gnr=?", (now(), d["gnr"])); c.commit()
+    _sn_cache.clear()
+    return len(seen)
+
+def sync_all_statements(c, limit=40):
+    since = (datetime.date.today() - datetime.timedelta(days=DRAFT_FOLLOW_DAYS)).isoformat(); n = 0
+    rows = c.execute("""SELECT * FROM drafts WHERE (active=1 OR (frist>=? AND stage IN ('regierung','parlament','kundgemacht')))
+                        AND COALESCE(sn_checked,0)<? ORDER BY active DESC, COALESCE(sn_checked,0) LIMIT ?""",
+                     (since, now() - 6 * 3600, limit)).fetchall()
+    for d in rows:
+        try: sync_statements(c, d); n += 1
+        except Exception as e: sys.stderr.write("Stellungnahmen %s: %r\n" % (d["gnr"], e))
+        time.sleep(1)
+    return n
+
+_sn_cache = {}
+def statement_map(c):
+    """nr → Stellungnahme mit Stellungnehmer (zwischengespeichert bis zur nächsten Synchronisierung)."""
+    if "m" not in _sn_cache:
+        _sn_cache["m"] = {r["nr"]: dict(r) for r in c.execute("""SELECT s.*, k.name AS sh_name, k.kind AS sh_kind, k.claimed_by, k.claim_status
+            FROM statements s LEFT JOIN stakeholders k ON k.id=s.stakeholder_id WHERE s.public=1""")}
+    return _sn_cache["m"]
+
+def on_behalf(c, r):
+    """Für wen ein Beitrag spricht: Stellungnehmer laut Parlament; ersatzweise die Quellenangabe des Bots."""
+    if not r["sn_nr"]: return None
+    sm = statement_map(c); out = []
+    for nr in [x.strip() for x in r["sn_nr"].split(",") if x.strip()]:
+        s_ = sm.get(nr)
+        if s_ and s_["sh_kind"]:
+            out.append({"stakeholder_id": s_["stakeholder_id"] if s_["sh_kind"] == "org" else None, "name": s_["sh_name"], "unit": s_["unit"],
+                        "kind": s_["sh_kind"], "statement": nr, "date": s_["date"], "url": s_["url"], "claimed": s_["claim_status"] == "approved"})
+        elif s_ is None:
+            src = next((x for x in deb_source(r) if x.get("ref") == nr), None)
+            if src: out.append({"stakeholder_id": None, "name": src["org"], "unit": None, "kind": "org", "statement": nr, "date": None, "url": src["url"], "claimed": False})
+    return out or None
+
+def statements_of(gnr, public=False):
+    """Stellungnahmen zu einem Entwurf mit Stellungnehmer und Stand der Erfassung auf der Plattform."""
+    c = db(); users = all_users(c)
+    rows = c.execute("""SELECT s.*, k.name sh_name, k.kind sh_kind, k.claim_status FROM statements s LEFT JOIN stakeholders k ON k.id=s.stakeholder_id
+                        WHERE s.gnr=? AND s.public=1 ORDER BY s.n""", (gnr,)).fetchall()
+    cap = {}
+    for r in c.execute("SELECT id, sn_nr, user_id, stance FROM contributions WHERE key LIKE ? AND removed_at IS NULL AND sn_nr IS NOT NULL", (gnr + "/%",)):
+        for nr in r["sn_nr"].split(", "):
+            x = cap.setdefault(nr, {"n": 0, "by": set(), "stances": {}}); x["n"] += 1
+            x["by"].add((users.get(r["user_id"]) or {}).get("name"))
+            if r["stance"]: x["stances"][r["stance"]] = x["stances"].get(r["stance"], 0) + 1
+    out = []
+    for r in rows:
+        x = cap.get(r["nr"], {"n": 0, "by": set(), "stances": {}})
+        out.append({"statement": r["nr"], "date": r["date"], "url": r["url"], "kind": r["sh_kind"] or "hidden",
+                    "name": r["sh_name"] if r["sh_kind"] else "Nicht-öffentliche Stellungnahme", "unit": r["unit"],
+                    "stakeholder_id": r["stakeholder_id"] if r["sh_kind"] == "org" else None, "verified": r["claim_status"] == "approved",
+                    "contributions": x["n"], "captured_by": sorted(b for b in x["by"] if b), "stances": x["stances"]})
+    d = c.execute("SELECT statements, sn_checked FROM drafts WHERE gnr=?", (gnr,)).fetchone()
+    return {"gnr": gnr, "statements": out, "total_parliament": d["statements"] if d else None,
+            "captured": sum(1 for x in out if x["contributions"]), "checked": iso(d["sn_checked"]) if d and d["sn_checked"] else None}
+
+def stakeholders_list():
+    c = db()
+    rows = c.execute("""SELECT k.*, COUNT(s.nr) n, COUNT(DISTINCT s.gnr) drafts, MAX(s.date) last FROM stakeholders k JOIN statements s ON s.stakeholder_id=k.id AND s.public=1
+                        WHERE k.kind='org' GROUP BY k.id ORDER BY n DESC, k.name""").fetchall()
+    capd = {}
+    for r in c.execute("SELECT sn_nr FROM contributions WHERE sn_nr IS NOT NULL AND removed_at IS NULL"):
+        for nr in r["sn_nr"].split(", "): capd[nr] = capd.get(nr, 0) + 1
+    sm = statement_map(c); per = {}
+    for nr, n in capd.items():
+        st = sm.get(nr)
+        if st and st["stakeholder_id"]: per[st["stakeholder_id"]] = per.get(st["stakeholder_id"], 0) + n
+    return {"stakeholders": [{"id": r["id"], "name": r["name"], "statements": r["n"], "drafts": r["drafts"], "last": r["last"],
+                              "contributions": per.get(r["id"], 0), "verified": r["claim_status"] == "approved"} for r in rows]}
+
+def stakeholder_view(sid, user=None):
+    c = db(); k = c.execute("SELECT * FROM stakeholders WHERE id=?", (sid,)).fetchone()
+    need(k and k["kind"] == "org", 404, "Diesen Stellungnehmer gibt es nicht.")
+    sts = c.execute("""SELECT s.*, d.title, d.frist, d.active, d.stage, d.inkraft FROM statements s LEFT JOIN drafts d ON d.gnr=s.gnr
+                       WHERE s.stakeholder_id=? AND s.public=1 ORDER BY s.date DESC""", (sid,)).fetchall()
+    nrs = {r["nr"] for r in sts}; per = {}
+    for r in c.execute("SELECT id, key, sn_nr, stance, category, issue, summary, why, text FROM contributions WHERE sn_nr IS NOT NULL AND removed_at IS NULL"):
+        for nr in r["sn_nr"].split(", "):
+            if nr in nrs: per.setdefault(nr, []).append(r)
+    out = []
+    for r in sts:
+        cs = per.get(r["nr"], []); stc = {}
+        for x in cs:
+            if x["stance"]: stc[x["stance"]] = stc.get(x["stance"], 0) + 1
+        out.append({"statement": r["nr"], "date": r["date"], "url": r["url"], "unit": r["unit"], "gnr": r["gnr"], "draft": r["title"],
+                    "draft_active": bool(r["active"]), "draft_stage": r["stage"], "contributions": len(cs), "stances": stc,
+                    "issues": sorted({x["issue"] for x in cs if x["issue"]})})
+    claimer = c.execute("SELECT id, name FROM users WHERE id=?", (k["claimed_by"],)).fetchone() if k["claimed_by"] else None
+    res = {"id": k["id"], "name": k["name"], "verified": k["claim_status"] == "approved",
+           "account": {"id": claimer["id"], "name": claimer["name"]} if claimer and k["claim_status"] == "approved" else None,
+           "statements": out, "total_contributions": sum(x["contributions"] for x in out)}
+    if user and user["id"] == k["claimed_by"]: res["my_claim"] = k["claim_status"]
+    return res
+
+_deb_cache = {}
+def debates_list():
+    """Alle Entwürfe mit Beiträgen und Kurzfassung ihrer Debatte (zwei Minuten zwischengespeichert)."""
+    hit = _deb_cache.get("all")
+    if hit and hit[0] > time.time() - 120: return hit[1]
+    c = db(); out = []
+    for d in list_drafts(True)["drafts"]:
+        if not d.get("contributions"): continue
+        try: x = debate(d["gnr"], public=True)
+        except ApiError: continue
+        sm = x["summary"]
+        out.append({"gnr": d["gnr"], "nr": d["nr"], "title": d["title"], "ministry": d.get("ministry"), "ressort": d.get("ressort"), "active": d["active"],
+                    "deadline": d["deadline"], "stage": d.get("stage"), "in_force_from": d.get("in_force_from"), "statements": d.get("statements_parliament"),
+                    "contested": sm["contested"], "agreed": sm["agreed"], "voices": sm["organizations"], "arguments": sm["arguments"],
+                    "contributions": sm["contributions"], "without_stance": sm["without_stance"],
+                    "top": [{"id": g["id"], "title": g["title"], "organizations": g["organizations"], "counts": g["counts"]} for g in x["issues"] if g["kind"] == "strittig"][:3]})
+    out.sort(key=lambda d: (-d["contested"], -d["voices"], d["deadline"] or ""))
+    res = {"debates": out}; _deb_cache["all"] = (time.time(), res); return res
+
+def r_debates(h): return debates_list()
+def r_statements(h): return statements_of(h.query.get("gnr", ""))
+def r_stakeholders(h): return stakeholders_list()
+def r_stakeholder(h): return stakeholder_view(int(h.query.get("id") or 0), h.session_user())
+
+def r_claim(h):
+    """Eine Organisation beantragt, einen Stellungnehmer als ihr Konto zu führen; das Gremium entscheidet."""
+    u = h.session_user(); need(u, 401, "Bitte anmelden.")
+    need(u["role"] == "org", 403, "Nur Konten von Organisationen können einen Stellungnehmer übernehmen.")
+    d = h.body(); sid = int(d.get("id") or 0); note = re.sub(r"\s+", " ", str(d.get("note") or "")).strip()[:500]
+    k = db().execute("SELECT * FROM stakeholders WHERE id=? AND kind='org'", (sid,)).fetchone(); need(k, 404, "Diesen Stellungnehmer gibt es nicht.")
+    need(k["claim_status"] != "approved", 409, "Dieser Stellungnehmer wird bereits von einem Konto geführt.")
+    need(len(note) >= 10, 400, "Bitte kurz begründen, z. B. Funktion und Kontakt für die Prüfung.")
+    db().execute("UPDATE stakeholders SET claimed_by=?, claim_status='pending', claim_note=?, claim_at=? WHERE id=?", (u["id"], note, now(), sid))
+    log(u["id"], "claim", sid, note[:200]); db().commit(); _sn_cache.clear()
+    return {"ok": True}
+
+def r_g_claim(h):
+    g = require_gremium(h); d = h.body(); sid = int(d.get("id") or 0); ok = bool(d.get("approve"))
+    k = db().execute("SELECT * FROM stakeholders WHERE id=? AND claim_status='pending'", (sid,)).fetchone(); need(k, 404, "Kein offener Antrag.")
+    if ok: db().execute("UPDATE stakeholders SET claim_status='approved' WHERE id=?", (sid,))
+    else: db().execute("UPDATE stakeholders SET claim_status=NULL, claimed_by=NULL, claim_note=NULL WHERE id=?", (sid,))
+    log(g["id"], "gremium:claim-" + ("approve" if ok else "reject"), k["claimed_by"], (k["name"] + ": " + (d.get("note") or ""))[:300]); db().commit(); _sn_cache.clear()
+    return {"ok": True}
+
 def sync_drafts():
     """Liste der Ministerialentwürfe der laufenden Gesetzgebungsperiode; laufende Begutachtungen importieren."""
     c = sqlite3.connect(DB_PATH, timeout=30); c.row_factory = sqlite3.Row
@@ -2881,6 +3173,9 @@ def sync_drafts():
     c.execute("UPDATE drafts SET stage='begutachtung' WHERE active=1"); c.commit()
     try: st = sync_draft_stages(c)
     except Exception as e: st = 0; sys.stderr.write("Stand der Entwürfe: %r\n" % e)
+    try: sn = sync_all_statements(c)
+    except Exception as e: sn = 0; sys.stderr.write("Stellungnahmen: %r\n" % e)
+    sys.stderr.write(f"Stellungnahmen: {sn} Entwürfe aktualisiert\n")
     c.execute("INSERT OR REPLACE INTO meta VALUES('drafts_synced',?)", (str(now()),)); c.commit(); c.close()
     sys.stderr.write(f"Begutachtungsentwürfe: {new} neu importiert, {st} abgeschlossene nachgeführt\n")
 
@@ -3055,7 +3350,8 @@ def scheduler():
             c = db()
             last = c.execute("SELECT v FROM meta WHERE k='drafts_synced'").fetchone()
             unstaged = c.execute("SELECT 1 FROM drafts WHERE active=0 AND stage IS NULL AND frist>=date('now','-365 day') LIMIT 1").fetchone()
-            if not last or now() - int(last[0]) > 6 * 3600 or unstaged: sync_drafts()
+            no_sn = not c.execute("SELECT 1 FROM statements LIMIT 1").fetchone()
+            if not last or now() - int(last[0]) > 6 * 3600 or unstaged or no_sn: sync_drafts()
         except Exception as e: sys.stderr.write("Entwürfe: %r\n" % e)
         try:
             if 7 <= time.localtime().tm_hour < 22: send_digests()
@@ -3428,7 +3724,7 @@ def _today(ts=None):
     d = datetime.datetime.fromtimestamp(ts if ts is not None else time.time(), _TZ) if _TZ else datetime.datetime.fromtimestamp(ts or time.time())
     return d.date()
 
-HIT_PAGES = {"debatte", "home", "law", "draft", "paket", "zahlen", "projekt", "api", "moderation", "konto", "impressum", "datenschutz", "statistik", "other"}
+HIT_PAGES = {"recht", "begutachtung", "stellungnehmer", "debatte", "home", "law", "draft", "paket", "zahlen", "projekt", "api", "moderation", "konto", "impressum", "datenschutz", "statistik", "other"}
 def bump(metric, n=1):
     try:
         c = db()
@@ -3667,6 +3963,8 @@ ROUTES = {
     ("POST", "/api/register"): r_register, ("POST", "/api/login"): r_login, ("POST", "/api/logout"): r_logout,
     ("POST", "/api/ack-key"): r_ack_key,
     ("POST", "/api/reset-request"): r_reset_request, ("POST", "/api/reset"): r_reset,
+    ("GET", "/api/statements"): r_statements, ("GET", "/api/debates"): r_debates, ("GET", "/api/stakeholders"): r_stakeholders, ("GET", "/api/stakeholder"): r_stakeholder,
+    ("POST", "/api/stakeholder/claim"): r_claim, ("POST", "/api/gremium/claim"): r_g_claim,
     ("POST", "/api/verify-email"): r_verify_email, ("POST", "/api/verify-resend"): r_verify_resend,
     ("POST", "/api/account/password"): r_change_pw, ("POST", "/api/account/delete"): r_delete_account,
     ("POST", "/api/contributions"): r_contribute, ("POST", "/api/ratings"): r_rate, ("POST", "/api/pairwise"): r_pair,

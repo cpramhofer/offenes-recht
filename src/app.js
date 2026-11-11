@@ -79,11 +79,18 @@ async function route(){
     catch(e){ S.verify = {state:"error", msg:e.message}; }
     render(); hit("other"); return;
   }
+  if (p[0]==="stellungnehmer" && /^\d+$/.test(p[1]||"")){
+    S.mode = "home"; S.page = "stellungnehmer"; S.gnr = null; S.law = null; if (S.panel==="anchor") S.panel = "default";
+    S.sh = null; render();
+    try { S.sh = await api("/api/stakeholder?id="+p[1]); } catch(e){ S.sh = {error:e.message}; }
+    render(); window.scrollTo(0,0); hit("stellungnehmer"); return;
+  }
   if (p[0]==="debatte" && /^\d{8}$/.test(p[1]||"")){
     const fresh = S.page !== "debatte" || S.debGnr !== p[1];
     S.page = "debatte"; S.mode = "home"; S.gnr = null; S.law = null; if (S.panel==="anchor") S.panel = "default";
     if (S.debGnr !== p[1]){ S.debGnr = p[1]; S.deb = null; S.debOpen = null; S.debTab = "streit"; }
-    S.debTab = ["streit","einig","weitere","legistik","matrix"].includes(p[2]) ? p[2] : (fresh ? "streit" : S.debTab);
+    S.debTab = ["streit","einig","weitere","legistik","matrix","stellungnahmen"].includes(p[2]) ? p[2] : (fresh ? "streit" : S.debTab);
+    if (S.debTab==="stellungnahmen" && (!S.debSn || S.debSn.gnr!==p[1])) api("/api/statements?gnr="+p[1]).then(j => { S.debSn = j; if (S.page==="debatte") renderPage(); }).catch(()=>{});
     if (!S.all) await loadAll().catch(()=>{});
     render(); if (fresh || !S.deb) { await loadDebate(); render(); }
     if (fresh) window.scrollTo(0,0);
@@ -123,9 +130,15 @@ async function route(){
     hit(S.law && S.law.tgroup==="me" ? "draft" : "law", S.gnr, pid);
   } else {
     S.mode = "home"; S.gnr = null; S.law = null; S.panel = S.panel==="anchor" ? "default" : S.panel;
+    S.area = p[0]==="recht" ? "recht" : p[0]==="begutachtung" ? "begutachtung" : "home";
+    if (S.area==="begutachtung") S.bTab = ["entwuerfe","debatten","stellungnehmer"].includes(p[1]) ? p[1] : "entwuerfe";
     if (!S.cat.stats) await loadCatalog(true);
-    await Promise.all([loadAll(), loadTopLaws(), api("/api/drafts").then(j => { S.drafts = j.drafts; }).catch(() => { S.drafts = []; })]);
-    render(); hit("home");
+    const extra = [];
+    if (S.area==="begutachtung" && S.bTab==="debatten") extra.push(api("/api/debates").then(j => { S.debates = j.debates; }).catch(() => { S.debates = []; }));
+    if (S.area==="begutachtung" && S.bTab==="stellungnehmer") extra.push(api("/api/stakeholders").then(j => { S.shs = j.stakeholders; }).catch(() => { S.shs = []; }));
+    if (S.area==="home") extra.push(api("/api/debates").then(j => { S.debates = j.debates; }).catch(() => { S.debates = []; }));
+    await Promise.all([loadAll(), loadTopLaws(), api("/api/drafts").then(j => { S.drafts = j.drafts; }).catch(() => { S.drafts = []; }), ...extra]);
+    render(); hit(S.area);
     if (S.jump){ const el = $(S.jump); S.jump = null; if (el) el.scrollIntoView({block:"start"}); } else window.scrollTo(0,0);
   }
 }
@@ -260,10 +273,14 @@ function renderAcct(){
 }
 function renderShell(){
   document.body.dataset.mode = S.mode; updateSide();
+  const area = S.mode==="law" ? (isDraftLaw() ? "begutachtung" : "recht")
+    : S.page==="debatte" || S.page==="stellungnehmer" ? "begutachtung" : S.page==="zahlen" || S.page==="paket" ? "recht"
+    : S.page==="projekt" ? "projekt" : S.page==="api" ? "api" : S.page ? "" : S.area==="home" ? "" : S.area;
+  document.querySelectorAll(".mainnav a[data-area]").forEach(a => a.setAttribute("aria-current", a.dataset.area===area ? "page" : "false"));
   const vb = $("vbar"), nv = S.user && S.user.email_verified===false;
   vb.hidden = !nv;
   if (nv) vb.innerHTML = `<div class="wrap"><strong>Bitte E-Mail-Adresse bestätigen.</strong> Wir haben einen Link an ${esc(S.user.email)} geschickt. Erst danach können Sie schreiben, bewerten und folgen. <button class="linkbtn" id="vresend">Link erneut senden</button></div>`;
-  $("crumb").innerHTML = S.mode==="law" && S.law ? `<button class="linkbtn" data-home>Alle Rechtsvorschriften</button> › ${esc(lawKurz())}` : "";
+  $("crumb").innerHTML = S.mode==="law" && S.law ? (isDraftLaw() ? `<a class="linkbtn" href="#/begutachtung">Begutachtung</a> › ${esc(lawKurz())}` : `<a class="linkbtn" href="#/recht">Geltendes Recht</a> › ${esc(lawKurz())}`) : "";
 }
 
 // ---- Startseite: Rechtsvorschriften | Projekt, darunter Vorschläge
@@ -280,12 +297,12 @@ function lawRow(r){
 }
 function propCard(c){
   const st = c.stats, base = c.base || "";
-  const who = c.author ? (c.author.role==="deleted" ? "Gelöschtes Konto" : c.author.name + (c.author.role==="bot" ? " · KI-Bot" : c.author.role==="org" ? " · Organisation" : "")) : "";
+  const who = whoText(c);
   return `<article class="pcard">
     <div class="chead"><span class="pill ${statusCls(st.status)}">${st.status}</span>${isRepeal(c)?'<span class="pill del">Streichung</span>':''}${goldPill(c)}${c.example?'<span class="vfy">Beispiel</span>':''}</div>
     <a class="paddr" href="#/g/${esc(c.key)}">${esc(c.where || c.key)}</a>
     <div class="diff">${propDiff(c, base, true)}</div>
-    ${c.why?`<p class="why clamp"><b>Begründung:</b> ${esc(c.why)}</p>`:""}
+    ${c.why?`<p class="why clamp"><b>Begründung:</b> ${esc(whyText(c))}</p>`:""}
     <div class="pmeter">${st.total ? `<span class="bar"><i style="width:${pct(st.share)}%"></i></span><span>${pct(st.share)} % Ja · ${st.total} Stimmen</span>` : `<span>Noch keine Bewertungen</span>`}</div>
     <div class="why">${esc(who)}</div>
   </article>`;
@@ -331,20 +348,133 @@ function propModeAuto(){
 }
 function homeProposals(){
   const mode = propModeAuto();
-  let ps = (S.all||[]).filter(c => c.type==="prop" && !c.removed);
+  let ps = (S.all||[]).filter(c => c.type==="prop" && !c.removed && !/^9/.test(c.key));
   if (mode==="new") ps.sort((a,b) => b.created - a.created || b.id - a.id);
   else if (mode==="contested") ps = ps.filter(c => c.stats.total >= 5).sort((a,b) => (b.stats.total*(1-Math.abs(b.stats.share-.5)*2)) - (a.stats.total*(1-Math.abs(a.stats.share-.5)*2)));
   else ps.sort((a,b) => b.stats.score - a.stats.score);
   return ps;
 }
 function renderHome(){
+  if (S.area==="recht") return renderRecht();
+  if (S.area==="begutachtung") return renderBegutachtung();
+  return renderHub();
+}
+function renderHub(){
+  const st = S.cat.stats || {}, dr = S.drafts || [], act = dr.filter(d => d.active).length, done = dr.length - act;
+  const props = (S.all||[]).filter(c => c.type==="prop" && !c.removed && !/^9/.test(c.key)).length;
+  const deb = S.debates || [], contested = deb.reduce((n,d) => n + d.contested, 0), voices = new Set();
+  $("law").innerHTML = `<div class="hub">
+    <section class="hubhead">
+      <div class="lbl">Offenes Recht</div>
+      <h1>Das Bundesrecht, Stelle für Stelle offen für alle.</h1>
+      <p class="lead">Bürgerinnen und Bürger, Organisationen und gekennzeichnete KI-Bots kommentieren, schlagen Änderungen vor und bewerten: im geltenden Recht und bei neuen Gesetzen schon während der Begutachtung.</p>
+      <form class="hubsearch" id="hubsearch" role="search"><label class="sr" for="hubq">Rechtsvorschrift suchen</label>
+        <input id="hubq" type="search" placeholder="Rechtsvorschrift suchen: Titel, Abkürzung oder BGBl-Nummer"><button class="btn" type="submit">Suchen</button></form>
+    </section>
+    <div class="hubgrid">
+      <a class="hubtile" href="#/recht">
+        <span class="lbl">Bereich</span><h2>Geltendes Recht</h2>
+        <p>Alle Rechtsvorschriften des Bundes, tagesaktuell aus dem RIS. Absatz für Absatz kommentieren, ändern, streichen, bewerten; Vorschläge zu Reformpaketen bündeln.</p>
+        <div class="hstats"><span><b>${nf(st.laws||0)}</b> Rechtsvorschriften</span><span><b>${nf(props)}</b> Vorschläge</span><span><b>${nf((S.pkgs||[]).length)}</b> Reformpakete</span></div>
+        <span class="go">Zum geltenden Recht</span></a>
+      <a class="hubtile" href="#/begutachtung">
+        <span class="lbl">Bereich</span><h2>Begutachtung</h2>
+        <p>Gesetzesentwürfe der Ministerien vor dem Beschluss: wer welche Stellungnahme abgegeben hat, wo gestritten wird und wo Einigkeit herrscht.</p>
+        <div class="hstats"><span><b>${act}</b> in Begutachtung</span><span><b>${done}</b> abgeschlossen, noch nicht in Kraft</span><span><b>${contested}</b> Streitpunkte</span></div>
+        <span class="go">Zur Begutachtung</span></a>
+    </div>
+    <section class="hubabout">
+      <div><h2>Warum es Offenes Recht gibt</h2>
+        <p>Österreich hat mehr als 10.000 geltende Rechtsvorschriften. Regeln kommen laufend dazu, aufgeräumt wird selten. Das Wissen, wo eine Regel nicht mehr passt, liegt bei denen, die mit ihr leben. Offenes Recht sammelt es Stelle für Stelle und macht sichtbar, welche Verbesserungen breite Zustimmung finden.</p>
+        <a class="linkbtn strong" href="#/projekt">Mehr über das Projekt</a></div>
+      <ol class="steps">
+        <li><span class="n">1</span><span><b>Lesen</b><br><span class="why">Rechtsvorschrift oder Entwurf wählen, Absatz oder Wörter markieren</span></span></li>
+        <li><span class="n">2</span><span><b>Vorschlagen</b><br><span class="why">Kommentar oder besserer Wortlaut mit Begründung</span></span></li>
+        <li><span class="n">3</span><span><b>Bewerten</b><br><span class="why">Fördert es Wachstum und Wohlstand für alle?</span></span></li>
+      </ol>
+    </section>
+  </div>`;
+}
+function areaHead(area, title, lead, tabs, cur){
+  return `<div class="areahead"><div class="lbl">Bereich</div><h1>${title}</h1>${lead?`<p class="why">${lead}</p>`:""}
+    ${tabs ? `<nav class="ktabs" aria-label="${title}">${tabs.map(([k,l,href,jump]) => `<a href="${href}"${jump?` data-jump="${jump}"`:""} aria-current="${cur===k}">${l}</a>`).join("")}</nav>` : ""}</div>`;
+}
+const BTABS = [["entwuerfe","Entwürfe","#/begutachtung"],["debatten","Debatten","#/begutachtung/debatten"],["stellungnehmer","Stellungnehmer","#/begutachtung/stellungnehmer"]];
+function debBar(counts){
+  const t = Object.values(counts).reduce((x,y)=>x+y,0)||1, w = k => Math.round((counts[k]||0)*100/t)+"%";
+  return `<span class="dbar mini" aria-hidden="true"><i class="s-weniger" style="width:${w("weniger")}"></i><i class="s-praez" style="width:${w("praez")}"></i><i class="s-mehr" style="width:${w("mehr")}"></i><i class="s-offen" style="width:${w("")}"></i></span>`;
+}
+function renderBegutachtung(){
+  const tab = S.bTab || "entwuerfe", dr = S.drafts || [];
+  let body = "";
+  if (tab==="entwuerfe"){
+    const act = dr.filter(d => d.active), done = dr.filter(d => !d.active);
+    body = `<section class="hprops" id="home-drafts" aria-labelledby="h-drafts">
+      <div class="hprops-head"><h2 id="h-drafts">In Begutachtung</h2><span class="why">${act.length} ${act.length===1?"Gesetzesentwurf":"Gesetzesentwürfe"} der Ministerien. Bis zum Ende der Frist kann jede und jeder Stellung nehmen, hier Absatz für Absatz.</span></div>
+      ${act.length ? `<div class="pgrid">${act.slice(0, S.draftsAll ? 99 : 9).map(draftCard).join("")}</div>
+        ${act.length > 9 && !S.draftsAll ? `<button class="linkbtn strong" id="draftsall">Alle ${act.length} laufenden Begutachtungen</button>` : ""}` : `<div class="empty">Gerade läuft keine Begutachtung.</div>`}
+      ${done.length ? `<h2 class="drsub" id="h-drafts-done">Abgeschlossen, noch nicht in Kraft <span class="why">${done.length}</span></h2>
+        <p class="why drsubp">Die Begutachtung ist vorbei, das Gesetz gilt aber noch nicht: bei der Regierung, im Parlament oder kundgemacht mit späterem Inkrafttreten. Kommentare und Vorschläge sind weiter möglich.</p>
+        <div class="seg drseg" role="group" aria-label="Stand">${[["","Alle"],["regierung","Bei der Regierung"],["parlament","Im Parlament"],["kundgemacht","Kundgemacht"]].map(([k,l]) => `<button data-drstage="${k}" aria-pressed="${(S.drStage||"")===k}">${l} (${k ? done.filter(d => d.stage===k).length : done.length})</button>`).join("")}</div>
+        ${(() => { const sel = done.filter(d => !S.drStage || d.stage===S.drStage).sort((a,b) => (b.contributions - a.contributions) || String(b.deadline).localeCompare(String(a.deadline)));
+          return `<div class="pgrid">${sel.slice(0, S.draftsDoneAll ? 999 : 9).map(draftCard).join("")}</div>
+          ${sel.length > 9 && !S.draftsDoneAll ? `<button class="linkbtn strong" id="draftsdoneall">Alle ${sel.length} anzeigen</button>` : ""}`; })()}` : ""}
+    </section>`;
+  } else if (tab==="debatten"){
+    const ds = S.debates;
+    body = !ds ? `<div class="empty">Lade …</div>` : ds.length ? `<p class="why">Debatten entstehen aus den Stellungnahmen und Beiträgen zu einem Entwurf: Jede Position wird am Entwurf gemessen (zurücknehmen, präzisieren, ausweiten); widersprechen sich Positionen an derselben Stelle, entsteht ein Streitpunkt.</p>
+      <div class="pgrid">${ds.map(d => `<article class="pcard drcard debcard">
+        <div class="chead"><span class="pill pkg">${esc(d.nr)}</span><span class="vfy">${esc(d.ressort||"")}</span>${d.active ? `<span class="pill s-diskutiert">in Begutachtung</span>` : stagePill(d)}</div>
+        <a class="paddr" href="#/debatte/${d.gnr}">${esc(d.title)}</a>
+        <div class="ddstats"><span class="${d.contested?"hot":""}"><b>${d.contested}</b> ${d.contested===1?"Streitpunkt":"Streitpunkte"}</span><span><b>${d.agreed}</b> einig</span><span><b>${d.voices}</b> ${d.voices===1?"Stellungnehmer":"Stellungnehmer"}</span></div>
+        ${d.top.length ? `<ul class="ddtop">${d.top.map(g => `<li><a href="#/debatte/${d.gnr}" data-debfocus="${g.id}">${esc(g.title)}</a>${debBar(g.counts)}</li>`).join("")}</ul>` : `<div class="why">${d.without_stance ? "Noch keine Streitpunkte: Die Beiträge sind noch nicht nach Richtung eingeordnet." : "Keine Streitpunkte."}</div>`}
+        <div class="row"><a class="btn" href="#/debatte/${d.gnr}">Debatte ansehen</a><a class="btn ghost" href="#/debatte/${d.gnr}/stellungnahmen">Stellungnahmen${d.statements!=null?` (${d.statements})`:""}</a></div>
+      </article>`).join("")}</div>` : `<div class="empty">Noch keine Debatten.</div>`;
+  } else {
+    const q = (S.shq||"").trim().toLowerCase(), list = (S.shs||[]).filter(x => !q || x.name.toLowerCase().includes(q));
+    body = !S.shs ? `<div class="empty">Lade …</div>` : `<p class="why">Organisationen und Behörden, die beim Parlament Stellungnahmen zu Begutachtungsentwürfen abgegeben haben (Quelle: Parlament). Erfasst ein Bot eine Stellungnahme, erscheint sie unter dem Stellungnehmer. Organisationen können ihren Eintrag nach Prüfung durch das Gremium als eigenes Konto führen.</p>
+      <input id="shq" type="search" class="shq" placeholder="Stellungnehmer suchen" value="${esc(S.shq||"")}" aria-label="Stellungnehmer suchen">
+      <div class="tablewrap"><table class="dt shtable"><thead><tr><th scope="col">Stellungnehmer</th><th scope="col" class="num">Stellungnahmen</th><th scope="col" class="num">Entwürfe</th><th scope="col" class="num">Erfasste Beiträge</th><th scope="col">Zuletzt</th></tr></thead>
+      <tbody>${list.slice(0, S.shAll ? 9999 : 100).map(x => `<tr><th scope="row"><a href="#/stellungnehmer/${x.id}">${esc(x.name)}</a>${x.verified?` <span class="pill role">geprüft</span>`:""}</th><td class="num">${x.statements}</td><td class="num">${x.drafts}</td><td class="num">${x.contributions||""}</td><td class="num">${fmtIso(x.last)}</td></tr>`).join("")}</tbody></table></div>
+      ${list.length > 100 && !S.shAll ? `<button class="linkbtn strong" id="shall">Alle ${list.length} anzeigen</button>` : ""}`;
+  }
+  $("law").innerHTML = areaHead("begutachtung", "Begutachtung", "Gesetzesentwürfe der Ministerien vor dem Beschluss, mit den Stellungnahmen und der Debatte dazu.", BTABS, tab) + `<div class="areabody">${body}</div>`;
+}
+function renderStakeholder(){
+  const k = S.sh;
+  if (!k) return `<article class="legal doc"><div class="lbl">Stellungnehmer</div><h1>Lade …</h1></article>`;
+  if (k.error) return `<article class="legal doc"><div class="lbl">Stellungnehmer</div><h1>Nicht gefunden</h1><p>${esc(k.error)}</p></article>`;
+  const ST = {weniger:"zurücknehmen", praez:"präzisieren", mehr:"ausweiten"};
+  const canClaim = S.user && S.user.role==="org" && !k.verified && !k.my_claim;
+  return `<article class="legal doc konto stakeholder">
+    <div class="lbl"><a href="#/begutachtung/stellungnehmer">Begutachtung › Stellungnehmer</a></div>
+    <h1>${esc(k.name)}</h1>
+    <div class="kmeta">${k.verified ? `<span class="pill role">geprüft</span><span class="why">vertreten durch das Konto ${esc(k.account.name)}</span>` : `<span class="why">Angelegt aus den Daten des Parlaments. Noch nicht von der Organisation selbst bestätigt.</span>`}
+      ${k.my_claim==="pending" ? `<span class="pill s-diskutiert">Übernahme beantragt, das Gremium prüft</span>` : ""}</div>
+    <div class="hero"><div><b>${k.statements.length}</b><span>${k.statements.length===1?"Stellungnahme":"Stellungnahmen"}</span></div>${(n => `<div><b>${n}</b><span>${n===1?"Entwurf":"Entwürfe"}</span></div>`)(new Set(k.statements.map(x => x.gnr)).size)}<div><b>${k.total_contributions}</b><span>erfasste Beiträge</span></div></div>
+    <h2>Stellungnahmen</h2>
+    <ul class="shlist">${k.statements.map(x => `<li>
+      <div><a class="paddr" href="${x.contributions ? "#/debatte/"+x.gnr : "#/g/"+x.gnr}">${esc(x.draft||x.gnr)}</a></div>
+      <div class="why"><a href="${esc(x.url)}" target="_blank" rel="noopener">${esc(x.statement)}</a> · ${fmtIso(x.date)}${x.unit?` · ${esc(x.unit)}`:""}</div>
+      <div class="why">${x.contributions ? `${x.contributions} ${x.contributions===1?"Beitrag":"Beiträge"} erfasst${Object.keys(x.stances).length ? ": "+Object.entries(x.stances).map(([s_,n]) => `${n} ${ST[s_]}`).join(", ") : ""}` : "Noch nicht auf der Plattform erfasst"}</div>
+      ${x.issues.length ? `<div class="chips">${x.issues.map(i => `<span class="chip static">${esc(i)}</span>`).join("")}</div>` : ""}
+    </li>`).join("")}</ul>
+    ${canClaim ? `<details class="botd claim"><summary>Das ist unsere Organisation</summary><form class="modform" id="claimform">
+      <p class="why">Ihr Organisationskonto übernimmt diesen Eintrag. Das Gremium prüft den Antrag; danach erscheinen die Stellungnahmen als „geprüft“ und mit Ihrem Konto verbunden.</p>
+      <label class="lbl" for="claimnote">Funktion und Kontakt für die Prüfung</label><textarea id="claimnote" rows="3" required minlength="10"></textarea>
+      <div class="row"><button class="btn" type="submit">Übernahme beantragen</button></div></form></details>` : ""}
+  </article>`;
+}
+function renderRecht(){
   const c = S.cat, st = c.stats || {groups:{}}, syncing = !st.laws, filtering = catFiltering();
   const props = homeProposals(), shown = S.propsAll ? props : props.slice(0, 6);
   const top = (S.topLaws||[]).filter(r => r.nc > 0).slice(0, 3);
-  const html = `<div class="homegrid">
+  const html = `${areaHead("recht", "Geltendes Recht", "Konsolidiertes Bundesrecht aus dem RIS. Kommentare, Änderungsvorschläge und Streichungen, bewertet nach einer Frage: Fördert es Wachstum und Wohlstand für alle?",
+      [["laws","Rechtsvorschriften","#/recht","home-laws"],["props","Vorschläge","#/recht","home-props"],["pkgs","Reformpakete","#/recht","home-pkgs"],["zahlen","Das Recht in Zahlen","#/zahlen"]], "laws")}
+  <div class="homegrid one">
     <section class="hblock" id="home-laws" aria-labelledby="h-laws">
       <div class="lbl">Bundesrecht, geltende Fassung</div>
-      <h1 id="h-laws">${syncing ? "Der Katalog wird aus dem RIS geladen …" : `${nf(st.laws)} Rechtsvorschriften. ${nf(st.norms)} Normen.`}</h1>
+      <h2 class="cath" id="h-laws">${syncing ? "Der Katalog wird aus dem RIS geladen …" : `${nf(st.laws)} Rechtsvorschriften. ${nf(st.norms)} Normen.`}</h2>
       <div class="gstats">${GROUPS.slice(1).map(([k,l]) => `<button class="gstat ${c.g===k?"on":""}" data-g="${k}" aria-pressed="${c.g===k}"><b>${nf(st.groups[k])}</b><span>${l}</span></button>`).join("")}</div>
       <div class="filters">
         <input id="catq" type="search" placeholder="Suchen: Titel, Abkürzung, Änderungsgesetz oder BGBl-Nummer" value="${esc(c.q)}" aria-label="Rechtsvorschrift suchen">
@@ -365,37 +495,10 @@ function renderHome(){
         <ol class="laws">${top.length ? top.map(lawRow).join("") : `<li class="why" style="padding:10px 0">Noch keine Beiträge.</li>`}</ol>
         <div class="row" style="display:flex;gap:16px;flex-wrap:wrap"><button class="linkbtn strong" id="catall">Alle ${syncing ? "" : nf(st.laws)+" "}Rechtsvorschriften</button><a class="linkbtn strong" href="#/zahlen">Das Recht in Zahlen</a></div>`}
     </section>
-    <section class="hblock about" id="home-about" aria-labelledby="h-about">
-      <div class="lbl">Über das Projekt</div>
-      <h2 id="h-about">Warum es Offenes Recht gibt</h2>
-      <p>Österreich hat mehr als 10.000 geltende Rechtsvorschriften. Kaum jemand kennt sie alle, aber alle müssen sie befolgen: Betriebe, Vereine, Gemeinden, jede und jeder Einzelne. Regeln kommen laufend dazu, aufgeräumt wird selten. So wächst ein Regelwerk, das Zeit, Geld und Vertrauen kostet.</p>
-      <p>Das Wissen, wo eine Regel nicht mehr passt, liegt nicht in einem Ministerium. Es liegt bei denen, die mit ihr leben: in der Werkstatt, die an einer überholten Schwelle scheitert, in der Behörde, die eine Frist nicht halten kann, bei der Nachbarin, die verstehen will, was für sie gilt. Offenes Recht sammelt dieses verstreute Wissen Stelle für Stelle und macht sichtbar, welche Verbesserungen breite Zustimmung finden.</p>
-      <p>Unabhängig und offen: Jeder Beitrag ist öffentlich, jede Stimme zählt gleich, KI-Bots helfen sichtbar gekennzeichnet mit.</p>
-      <h3>So funktioniert es</h3>
-      <ol class="steps">
-        <li><span class="n">1</span><span><b>Lesen</b><br><span class="why">Rechtsvorschrift wählen, Absatz oder einzelne Wörter markieren</span></span></li>
-        <li><span class="n">2</span><span><b>Vorschlagen</b><br><span class="why">Kommentar oder besserer Wortlaut mit Begründung</span></span></li>
-        <li><span class="n">3</span><span><b>Bewerten</b><br><span class="why">Fördert es Wachstum und Wohlstand für alle?</span></span></li>
-      </ol>
-      <div class="row">${S.user ? "" : `<button class="btn" data-open="register">Registrieren</button>`}<a class="btn ghost" href="#/projekt/bewertung">So wird bewertet</a><a class="btn ghost" href="#/projekt">Mehr über das Projekt</a></div>
-    </section>
   </div>
-  ${(S.drafts||[]).length ? `<section class="hprops" id="home-drafts" aria-labelledby="h-drafts">
-    <div class="hprops-head"><h2 id="h-drafts">Neues Recht in Begutachtung</h2>
-      <span class="why">${(n => `${n} ${n===1?"Gesetzesentwurf":"Gesetzesentwürfe"} der Ministerien in Begutachtung.`)(S.drafts.filter(d => d.active).length)} Bis zum Ende der Frist kann jede und jeder Stellung nehmen, hier Absatz für Absatz. Die Debatte zeigt, wer welche Position vertritt.</span></div>
-    ${(() => { const act = S.drafts.filter(d => d.active), done = S.drafts.filter(d => !d.active);
-      return `${act.length ? `<div class="pgrid">${act.slice(0, S.draftsAll ? 99 : 6).map(draftCard).join("")}</div>
-        ${act.length > 6 && !S.draftsAll ? `<button class="linkbtn strong" id="draftsall">Alle ${act.length} laufenden Begutachtungen</button>` : ""}` : `<div class="empty">Gerade läuft keine Begutachtung.</div>`}
-      ${done.length ? `<h3 class="drsub" id="h-drafts-done">Begutachtung abgeschlossen, noch nicht in Kraft <span class="why">${done.length}</span></h3>
-        <p class="why drsubp">Die Begutachtung ist vorbei, das Gesetz gilt aber noch nicht: bei der Regierung, im Parlament oder kundgemacht mit späterem Inkrafttreten. Kommentare und Vorschläge sind weiter möglich.</p>
-        <div class="seg drseg" role="group" aria-label="Stand">${[["","Alle"],["regierung","Bei der Regierung"],["parlament","Im Parlament"],["kundgemacht","Kundgemacht"]].map(([k,l]) => `<button data-drstage="${k}" aria-pressed="${(S.drStage||"")===k}">${l} (${k ? done.filter(d => d.stage===k).length : done.length})</button>`).join("")}</div>
-        ${(() => { const sel = done.filter(d => !S.drStage || d.stage===S.drStage).sort((a,b) => (b.contributions - a.contributions) || String(b.deadline).localeCompare(String(a.deadline)));
-          return `<div class="pgrid">${sel.slice(0, S.draftsDoneAll ? 999 : 6).map(draftCard).join("")}</div>
-          ${sel.length > 6 && !S.draftsDoneAll ? `<button class="linkbtn strong" id="draftsdoneall">Alle ${sel.length} anzeigen</button>` : ""}`; })()}` : ""}`; })()}
-  </section>` : ""}
   <section class="hprops" id="home-props" aria-labelledby="h-props">
     <div class="hprops-head">
-      <h2 id="h-props">${propModeAuto()==="new" ? "Neueste Vorschläge" : propModeAuto()==="contested" ? "Umstrittene Vorschläge" : "Am besten bewertete Vorschläge"}</h2>
+      <h2 id="h-props">Vorschläge zum geltenden Recht</h2>
       <div class="seg" role="group" aria-label="Reihung">${[["best","Beste"],["new","Neueste"],["contested","Umstritten"]].map(([k,l]) => `<button data-pmode="${k}" aria-pressed="${propModeAuto()===k}">${l}</button>`).join("")}</div>
     </div>
     ${shown.length ? `<div class="pgrid">${shown.map(propCard).join("")}</div>` : `<div class="empty">Noch keine Vorschläge${propModeAuto()==="contested"?" mit genug Stimmen für diese Ansicht":""}.</div>`}
@@ -428,8 +531,8 @@ function renderToc(){
     <div class="why">${nf(S.norms.length)} Normen${loading?` · Überschriften werden geladen (${nf(loading)} offen)`:""}</div>
     <ol class="toclist">${list.map(n => { const c = countBy(n.pid), on = c ? Math.max(1, Math.round(c/max*5)) : 0;
       return `<li><button data-pid="${n.pid}" aria-current="${n.pid===S.pid}"><span class="pn">${esc(n.label)}</span><span class="pt">${esc(n.title||"")}</span><span class="heat" title="${c} Beiträge">${[1,2,3,4,5].map(k=>`<i class="${k<=on?"on":""}"></i>`).join("")}</span></button></li>`; }).join("")}</ol>
-    <div class="navbtns">${isDraftLaw() || S.data.some(x => !x.removed) ? `<a class="btn" href="#/debatte/${S.law.gnr}">Debatte: Streitpunkte und Positionen</a>` : ""}<button class="btn ghost" id="ovbtn">Top-Vorschläge in ${isDraftLaw()?"diesem Entwurf":"diesem Gesetz"}</button>${isDraftLaw() ? `<button class="btn ghost" id="stellungnahme">Beiträge als Stellungnahme</button>` : (() => { const wk = `${S.gnr}/gesetz/ganz`, nc = S.data.filter(x => !x.removed && x.key===wk).length;
-      return `<button class="btn ghost" data-whole="${wk}">Ganze Rechtsvorschrift aufheben${nc?` (${nc})`:""}</button>`; })()}<button class="btn ghost" id="botsbtn">Zugelassene KI-Bots</button><a class="btn ghost" href="#/projekt/bewertung">So wird bewertet</a></div>`;
+    <div class="navbtns">${isDraftLaw() ? `<a class="btn" href="#/debatte/${S.law.gnr}">Debatte: Streitpunkte und Positionen</a><a class="btn ghost" href="#/debatte/${S.law.gnr}/stellungnahmen">Stellungnahmen${dr && dr.statements_parliament!=null ? ` (${dr.statements_parliament})` : ""}</a>` : ""}<button class="btn ghost" id="ovbtn">Top-Vorschläge in ${isDraftLaw()?"diesem Entwurf":"diesem Gesetz"}</button>${isDraftLaw() ? `<button class="btn ghost" id="stellungnahme">Als Stellungnahme an das Parlament exportieren</button>` : (() => { const wk = `${S.gnr}/gesetz/ganz`, nc = S.data.filter(x => !x.removed && x.key===wk).length;
+      return `<button class="btn ghost" data-whole="${wk}">Ganze Rechtsvorschrift aufheben${nc?` (${nc})`:""}</button>`; })()}</div>`;
   const cur = $("toc").querySelector('[aria-current="true"]'); if (cur && !q) cur.scrollIntoView({block:"nearest"});
 }
 // Säulendiagramm: eine Reihe, ohne Legende (der Titel benennt sie), Tooltip je Säule, Tabelle als Alternative
@@ -500,6 +603,17 @@ function renderNorm(){
 }
 
 // ---- Beitragskarte
+function obName(o){ return o.stakeholder_id ? `<a class="who" href="#/stellungnehmer/${o.stakeholder_id}">${esc(o.name)}</a>` : `<span class="who">${esc(o.name)}</span>`; }
+function onBehalfHtml(c){
+  const ob = c.on_behalf, a = c.author || {};
+  return `${ob.map(o => `${obName(o)}${o.claimed?`<span class="pill role">geprüft</span>`:""}<span class="pill sn">Stellungnahme</span><a class="vfy" href="${esc(o.url||"#")}" target="_blank" rel="noopener">${esc(o.statement)}</a>`).join(`<span class="vfy">·</span>`)}
+    <span class="vfy capt" style="flex-basis:100%">erfasst von ${esc(a.name||"?")}${a.role==="bot"?" (KI-Bot)":""} aus der Stellungnahme beim Parlament</span>`;
+}
+function whyText(c){ return c.on_behalf ? (c.why||"").replace(/^Stakeholder:[\s\S]*?\)\.\s*/, "") : (c.why||""); }
+function whoText(c){
+  if (c.on_behalf) return c.on_behalf.map(o => o.name).join(", ") + " · Stellungnahme" + (c.author ? `, erfasst von ${c.author.name}` : "");
+  return c.author ? (c.author.role==="deleted" ? "Gelöschtes Konto" : c.author.name + (c.author.role==="bot" ? " · KI-Bot" : c.author.role==="org" ? " · Organisation" : "")) : "";
+}
 function authorHtml(a){
   if (!a) return "";
   if (a.role==="deleted") return `<span class="who" style="color:var(--muted)">Gelöschtes Konto</span>`;
@@ -568,10 +682,10 @@ function cardHtml(c, opts={}){
   const changed = cur && c.base && cur.t !== c.base;
   return `<article class="card">
     <div class="chead"><span class="pill ${c.type==="prop"?(isRepeal(c)?"del":"prop"):"com"}">${c.type==="prop"?propKind(c):"Kommentar"}</span><span class="pill ${statusCls(c.stats.status)}">${c.stats.status}</span>${c.example?'<span class="vfy">Beispiel</span>':''}${own?'<span class="vfy">Ihr Beitrag</span>':''}${c.via==="api"?'<span class="vfy">über API</span>':''}${goldPill(c)}</div>
-    <div class="chead">${authorHtml(c.author)}</div>
+    <div class="chead">${c.on_behalf ? onBehalfHtml(c) : authorHtml(c.author)}</div>
     ${opts.showAddr?`<div class="addr" data-goto="${esc(c.key)}">${esc(c.where || c.key)}</div>`:""}
     ${c.w?`<div><span class="wq">„${esc(c.w.quote)}“</span></div>`:""}
-    ${c.type==="prop" ? `<div class="diff">${propDiff(c, base, opts.compact)}</div>${changed?`<div class="note-box">Der Normtext wurde seit diesem Vorschlag geändert. Der Vergleich zeigt die Änderung gegenüber dem damaligen Wortlaut.</div>`:""}${c.why?`<div class="why"><b>Begründung:</b> ${esc(c.why)}</div>`:""}
+    ${c.type==="prop" ? `<div class="diff">${propDiff(c, base, opts.compact)}</div>${changed?`<div class="note-box">Der Normtext wurde seit diesem Vorschlag geändert. Der Vergleich zeigt die Änderung gegenüber dem damaligen Wortlaut.</div>`:""}${c.why?`<div class="why"><b>Begründung:</b> ${esc(whyText(c))}</div>`:""}
       ${c.amend || /\/gesetz\/ganz$/.test(c.key) ? `<details class="amend"><summary>Novellierungstext</summary>${c.amend?`<pre class="code">${esc(c.amend)}</pre>`:`<p class="why">Aufhebung der gesamten Rechtsvorschrift, siehe Gesetzesentwurf.</p>`}
         <div class="row">${c.amend?`<button class="linkbtn subtle" data-copy="${esc(c.amend)}">Kopieren</button>`:""}<button class="linkbtn subtle" data-draft="${c.id}">Als Gesetzesentwurf</button></div></details>` : ""}` : `<div class="body">${esc(c.text)}</div>`}
     ${scoreHtml(c)}
@@ -794,7 +908,7 @@ function renderGremiumPage(){
           <div class="why">Das Profil steht öffentlich bei jedem Beitrag des Bots. Änderungen werden mit altem und neuem Wert protokolliert.</div>
           <button class="btn ghost" type="submit">Profil speichern</button></form></details></article>`;
   const nOpenAn = an.findings.filter(a => !a.review).length, nRep = (g.reports||[]).length;
-  const count = {antraege:g.pending.length, meldungen:nRep, muster:nOpenAn, bots:(g.bots||[]).length};
+  const count = {antraege:g.pending.length + (g.claims||[]).length, meldungen:nRep, muster:nOpenAn, bots:(g.bots||[]).length};
   const head = `<div class="lbl">Zulassungsgremium</div><h1>Gremium</h1>
     <div class="hero gtiles">
       <a href="#/gremium/antraege" class="${g.pending.length?"warn":""}"><b>${g.pending.length}</b><span>offene Anträge</span></a>
@@ -805,7 +919,11 @@ function renderGremiumPage(){
     <nav class="ktabs" aria-label="Bereiche">${GTABS.map(([k,l]) => `<a href="#/gremium/${k}" aria-current="${tab===k}">${l}${count[k]!==undefined && k!=="bots" && count[k] ? ` <span class="badge">${count[k]}</span>` : ""}</a>`).join("")}</nav>`;
   let body = "";
   if (tab==="antraege") body = `<p class="why">KI-Bots dürfen erst nach Zulassung veröffentlichen. Organisationen schreiben sofort, werden aber erst nach Prüfung als „geprüft“ ausgewiesen. Jede Entscheidung wird protokolliert.</p>
-    <div class="glist">${g.pending.length ? g.pending.map(card).join("") : `<div class="empty">Keine offenen Anträge.</div>`}</div>`;
+    <div class="glist">${g.pending.length ? g.pending.map(card).join("") : `<div class="empty">Keine offenen Anträge.</div>`}</div>
+    ${(g.claims||[]).length ? `<h2 class="gsub">Übernahme von Stellungnehmern</h2><p class="why">Eine Organisation möchte einen aus den Parlamentsdaten angelegten Stellungnehmer als ihr Konto führen.</p>
+      <div class="glist">${g.claims.map(k => `<article class="card gcard"><div class="chead"><a class="who" href="#/stellungnehmer/${k.id}">${esc(k.name)}</a><span class="pill role">Stellungnehmer</span><span class="vfy">beantragt ${fmtDate(k.at)}</span></div>
+        <div class="why">Antrag von <b>${esc(k.account.name)}</b> (${esc(k.account.email)}${k.account.register?", "+esc(k.account.register):""})</div><p>${esc(k.note||"")}</p>
+        <div class="row"><button class="btn" data-claim="${k.id}" data-ok="1">Übernahme bestätigen</button><button class="btn ghost" data-claim="${k.id}" data-ok="">Ablehnen</button></div></article>`).join("")}</div>` : ""}`;
   else if (tab==="meldungen") body = `<p class="why">Entfernt werden nur rechtswidrige Inhalte, persönliche Angriffe, Spam, Beiträge ohne Normbezug und nicht gekennzeichnete Bots. Meinungen bleiben stehen. Jede Entscheidung erscheint im <a href="#/moderation">Moderationsprotokoll</a>.</p>
     <div class="glist">${nRep ? g.reports.map(repRow).join("") : `<div class="empty">Keine offenen Meldungen.</div>`}</div>`;
   else if (tab==="muster") body = `<p class="why">Ohne ID Austria lassen sich Mehrfachkonten nicht ausschließen. Erkannt werden Registrierungs- und Stimmenwellen, einseitige Unterstützung und gleichförmig abstimmende Gruppen, ohne IP-Adressen. Ausgesetzte Stimmen zählen nicht, bleiben aber gespeichert und können wieder gezählt werden. Derzeit ausgesetzt: ${an.held_accounts} Konten.</p>
@@ -999,17 +1117,17 @@ function debGo(id){
 }
 const orgsTxt = a => a.organizations.join(", ");
 function debArg(a, g){
-  const ws = (g.contradictions||[]).filter(w => w.explicit && (w.a.id===a.id || w.b.id===a.id))
-    .map(w => { const o = w.a.id===a.id ? w.b : w.a; return `<div class="dwid"><b>Widerspricht ${esc(o.organizations.join(", "))}</b>${w.note?`: ${esc(w.note)}`:""}</div>`; }).join("");
+  const ws = (a.responds_to||[]).map(o => `<div class="dwid"><b>Geht ein auf ${esc(o.organizations.join(", "))}</b>${o.note?`: ${esc(o.note)}`:""}</div>`).join("");
   const sv = a.soundness, share = sv.votes ? Math.round(sv.share*100)+" % stichhaltig · " : "";
   const RB = [["h","Ja"],["t","Teilweise"],["n","Nein"]];
   return `<div class="darg">
-    <div class="dorg"><b>${esc(orgsTxt(a))}</b>${a.category?`<span class="chip static">${esc(a.category)}</span>`:""}</div>
+    <div class="dorg">${a.organizations.map((o,i) => a.stakeholder_ids && a.stakeholder_ids[i] ? `<a href="#/stellungnehmer/${a.stakeholder_ids[i]}"><b>${esc(o)}</b></a>` : `<b>${esc(o)}</b>`).join(", ")}${a.category?`<span class="chip static">${esc(a.category)}</span>`:""}</div>
     <p>${esc(a.summary)}</p>${ws}
     <div class="dsrc why">${a.sources.map(s => s.url ? `<a href="${esc(s.url)}" target="_blank" rel="noopener">${esc(s.ref||"Quelle")}</a>` : esc(s.ref||"")).join(" · ")}
       ${a.places.length>1?`<span>betrifft ${a.places.length} Stellen</span>`:""}
       <span>${a.contributions.length===1?"1 Beitrag":a.contributions.length+" Beiträge, zusammengefasst"}</span>
       ${a.bot_wording?`<span title="Die Stellungnahme enthält keinen Textvorschlag; der Bot hat den Wortlaut ausformuliert.">Wortlaut vom Bot</span>`:""}
+      ${(a.captured_by||[]).length?`<span>erfasst von ${esc(a.captured_by.join(", "))} (KI-Bot)</span>`:""}
       <a href="#/g/${esc(a.key)}">ansehen</a></div>
     <div class="drate"><span class="why">Stichhaltig?</span>${RB.map(([v,l]) => `<button class="btn ghost sm" data-argrate="${a.id}" data-v="${v}" aria-pressed="${a.mine===v}">${l}</button>`).join("")}
       <span class="why dscore">${share}${sv.votes} ${sv.votes===1?"Stimme":"Stimmen"}</span></div>
@@ -1021,7 +1139,7 @@ function debIssue(g, st){
   const cols = ["weniger","praez","mehr"].concat(c[""] ? [""] : []);
   return `<article class="dissue k-${g.kind}" id="deb-${g.id}">
     <button class="dhead" data-debtoggle="${g.id}" aria-expanded="${open}">
-      <span class="dmeta"><span class="pill dk-${g.kind}">${DEB_KINDS[g.kind]}</span><span class="dplace">${esc(g.places.map(p => p.label).slice(0,3).join(" · "))}${g.places.length>3?` · +${g.places.length-3}`:""}</span>
+      <span class="dmeta"><span class="pill dk-${g.kind}">${DEB_KINDS[g.kind]}</span>${(() => { const L = [...new Set(g.places.map(p => p.label))]; return `<span class="dplace">${esc(L.slice(0,3).join(" · "))}${L.length>3?` · +${L.length-3}`:""}</span>`; })()}
         <span class="why dcount">${g.arguments.length} ${g.arguments.length===1?"Argument":"Argumente"} von ${g.organizations} ${g.organizations===1?"Stimme":"Stimmen"}</span><span class="dchev" aria-hidden="true">${open?"−":"+"}</span></span>
       <span class="dtitle">${esc(g.title)}</span>
       ${g.question?`<span class="why">${esc(g.question)}</span>`:""}
@@ -1046,14 +1164,24 @@ function renderDebatte(){
   const by = k => d.issues.filter(g => g.kind===k);
   const weitere = d.issues.filter(g => g.kind==="mehrere" || g.kind==="anregung");
   const left = daysLeft(d.deadline);
-  const TABS = [["streit",`Strittig (${sm.contested})`],["einig",`Einigkeit (${sm.agreed})`],["weitere",`Weitere Anregungen (${weitere.length})`],["legistik",`Legistisches (${sm.legistic})`],["matrix","Wer steht wo"]];
+  const TABS = [["streit",`Strittig (${sm.contested})`],["einig",`Einigkeit (${sm.agreed})`],["weitere",`Weitere Anregungen (${weitere.length})`],["legistik",`Legistisches (${sm.legistic})`],["matrix","Wer steht wo"]].concat(d.draft ? [["stellungnahmen",`Stellungnahmen${d.statements!=null?` (${d.statements})`:""}`]] : []);
   const tiles = [["streit",sm.contested,"Streitpunkte","Positionen widersprechen einander","strittig"],["einig",sm.agreed,"Einigkeit","Gleiche Richtung, keine Gegenstimme","einig"],
-                 ["matrix",sm.organizations,sm.organizations===1?"Stimme":"Stimmen","Organisationen und Personen","stimmen"],["legistik",sm.legistic,"Legistisch","Formale Korrekturen","legistik"]];
+                 ["matrix",sm.organizations,"Stellungnehmer","Organisationen, Behörden, Personen","stimmen"],["legistik",sm.legistic,"Legistisch","Formale Korrekturen","legistik"]];
   let body = "";
   if (tab==="streit") body = `<p class="why dexpl">Jede Position wird am Text gemessen: <b class="t-weniger">${esc(st.weniger.label)}</b> (${esc(st.weniger.hint.toLowerCase())}), <b class="t-praez">${esc(st.praez.label)}</b> (${esc(st.praez.hint.toLowerCase())}) oder <b class="t-mehr">${esc(st.mehr.label)}</b> (${esc(st.mehr.hint.toLowerCase())}). Gleichlautende Beiträge derselben Stimme sind zu einem Argument zusammengefasst.</p>
       ${by("strittig").map(g => debIssue(g, st)).join("") || `<div class="empty">Noch keine Streitpunkte. Streit wird erkannt, wenn Beiträge eine Richtung angeben und einander widersprechen.</div>`}`;
   else if (tab==="einig") body = by("einig").map(g => debIssue(g, st)).join("") || `<div class="empty">Noch keine Punkte, bei denen sich mehrere Stimmen in dieselbe Richtung einig sind.</div>`;
   else if (tab==="weitere") body = weitere.map(g => debIssue(g, st)).join("") || `<div class="empty">Keine weiteren Anregungen.</div>`;
+  else if (tab==="stellungnahmen"){
+    const sn = S.debSn && S.debSn.gnr===d.gnr ? S.debSn : null, ST = {weniger:"zurücknehmen", praez:"präzisieren", mehr:"ausweiten"};
+    body = !sn ? `<div class="empty">Lade …</div>` : `<p class="why">Alle beim Parlament eingebrachten Stellungnahmen zu diesem Entwurf. ${sn.captured} von ${sn.statements.length} sind auf der Plattform als Beiträge erfasst.</p>
+      <div class="tablewrap"><table class="dt sntable"><thead><tr><th scope="col">Nr.</th><th scope="col">Stellungnehmer</th><th scope="col">Datum</th><th scope="col">Auf der Plattform</th></tr></thead><tbody>
+      ${sn.statements.map(x => `<tr><td class="num"><a href="${esc(x.url)}" target="_blank" rel="noopener">${esc(x.statement.split("/")[0])}</a></td>
+        <th scope="row">${x.stakeholder_id ? `<a href="#/stellungnehmer/${x.stakeholder_id}">${esc(x.name)}</a>` : x.kind==="hidden" ? `<span class="why">${esc(x.name)}</span>` : esc(x.name)}${x.kind==="person"?` <span class="why">Privatperson</span>`:""}${x.verified?` <span class="pill role">geprüft</span>`:""}${x.unit?`<br><span class="why">${esc(x.unit)}</span>`:""}</th>
+        <td class="num">${fmtIso(x.date)}</td>
+        <td>${x.contributions ? `${x.contributions} ${x.contributions===1?"Beitrag":"Beiträge"}${Object.keys(x.stances).length ? " · "+Object.entries(x.stances).map(([s_,n]) => `${n} ${ST[s_]}`).join(", ") : ""}<br><span class="why">erfasst von ${esc(x.captured_by.join(", "))}</span>` : `<span class="why">noch nicht erfasst</span>`}</td></tr>`).join("")}
+      </tbody></table></div>`;
+  }
   else if (tab==="legistik") body = by("legistik").length ? `<ul class="dleg">${by("legistik").map(g => `<li><a class="dplace" href="#/g/${esc(g.places[0].key)}">${esc(g.places[0].label)}</a><span>${esc(g.arguments.map(a => a.summary).join(" · "))}</span><span class="why">${esc([...new Set(g.arguments.flatMap(a => a.organizations))].join(", "))}</span></li>`).join("")}</ul>` : `<div class="empty">Keine rein legistischen Korrekturen (Kategorie „Legistik“).</div>`;
   else {
     const m = d.matrix, SY = {"+":["t-mehr",st.mehr.label],"−":["t-weniger",st.weniger.label],"~":["t-praez",st.praez.label],"±":["",`${st.weniger.label} und ${st.mehr.label.toLowerCase()}`],"•":["","Richtung nicht angegeben"]};
@@ -1063,7 +1191,7 @@ function renderDebatte(){
       : `<div class="empty">Die Matrix entsteht, sobald es Streitpunkte oder Einigkeit gibt.</div>`;
   }
   return `<article class="legal doc konto debatte">
-    <div class="lbl">${d.draft ? `Begutachtung · ${esc(d.abbreviation||"")}${d.ministry?" · "+esc(d.ministry):""}` : "Debatte"}</div>
+    <div class="lbl">${d.draft ? `<a href="#/begutachtung/debatten">Begutachtung › Debatten</a> · ${esc(d.abbreviation||"")}${d.ministry?" · "+esc(d.ministry):""}` : "Debatte"}</div>
     <h1>${esc(d.title)}</h1>
     <div class="kmeta">${d.draft && left!==null ? `<span class="pill ${left<=3?"s-umstritten":"s-diskutiert"}">${left<0?"Begutachtung abgeschlossen":left===0?"Begutachtungsfrist endet heute":`Begutachtung noch ${left} ${left===1?"Tag":"Tage"}`}</span>` : ""}
       ${d.statements!=null?`<span class="chip static">${d.statements} Stellungnahmen beim Parlament</span>`:""}<span class="chip static">${sm.contributions} Beiträge · ${sm.arguments} Argumente</span>
@@ -1085,6 +1213,7 @@ function renderPage(){
   if (S.page==="konto") html = renderKonto();
   else if (S.page==="gremium") html = renderGremiumPage();
   else if (S.page==="debatte") html = renderDebatte();
+  else if (S.page==="stellungnehmer") html = renderStakeholder();
   else if (S.page==="bestaetigen") html = S.verify.state==="loading" ? `<article class="legal"><div class="lbl">Konto</div><h1>E-Mail-Adresse wird bestätigt …</h1></article>`
     : S.verify.state==="ok" ? `<article class="legal"><div class="lbl">Konto</div><h1>E-Mail-Adresse bestätigt</h1><p>Danke${S.verify.name?", "+esc(S.verify.name):""}. Sie können jetzt Beiträge schreiben, bewerten und Inhalten folgen.</p>
         <div class="row" style="display:flex;gap:8px;flex-wrap:wrap">${S.user ? `<a class="btn" href="#/">Zur Startseite</a>` : `<button class="btn" data-open="login">Anmelden</button>`}</div></article>`
@@ -1104,6 +1233,7 @@ function renderPage(){
     <h2>Welche Daten wir verarbeiten</h2>
     <ul><li><b>Konto:</b> E-Mail-Adresse, Name oder Pseudonym, Passwort (nur als nicht umkehrbarer Hash), Kontoart; bei Organisationen die Register-Nummer, bei KI-Bots Auftraggeber, Auftrag, Betreiber und Modell.</li>
     <li><b>Beiträge:</b> Kommentare und Änderungsvorschläge mit Zeitpunkt und Bezug auf die Rechtsstelle.</li>
+    <li><b>Stellungnahmen im Begutachtungsverfahren:</b> Aus den offenen Daten des Parlaments übernehmen wir Absender, Nummer, Datum und Link der dort veröffentlichten Stellungnahmen, bei Privatpersonen den vom Parlament veröffentlichten Namen. Für Privatpersonen legen wir kein Profil an und führen ihre Stellungnahmen nicht über Entwürfe hinweg zusammen. Entfernt das Parlament eine Stellungnahme, blenden wir sie bei der nächsten Abfrage aus. Rechtsgrundlage ist unser berechtigtes Interesse an der Nachvollziehbarkeit öffentlicher Begutachtungsverfahren (Art. 6 Abs. 1 lit. f DSGVO); Sie können jederzeit widersprechen.</li>
     <li><b>Bewertungen und Paarvergleiche:</b> Ihre Stimme zu einzelnen Beiträgen und Reformpaketen.</li>
     <li><b>Zugriffszahlen:</b> Wir zählen Aufrufe anonym als reine Tageszahlen je Seite und Rechtsvorschrift. Dafür werden weder IP-Adressen noch Cookies oder sonstige Kennungen gespeichert; ob ein Aufruf der erste in einem Browser-Tab ist, merkt sich nur Ihr Browser (sessionStorage) und meldet es als „neu“.</li>
     <li><b>Gefolgte Inhalte:</b> Welchen Gesetzen, Entwürfen, Beiträgen und Paketen Sie folgen, und die gewählte Häufigkeit der Benachrichtigungen. Daraus erstellen wir die E-Mail-Zusammenfassung; abbestellen können Sie sie mit einem Klick in jeder E-Mail oder unter „Mein Konto“.</li>
@@ -1523,6 +1653,7 @@ async function refresh(){ if (S.mode==="law") await loadState(); await loadAll()
 // ---- Ereignisse
 let qTimer = null;
 document.addEventListener("input", e => {
+  if (e.target.id==="shq"){ S.shq = e.target.value; const pos = e.target.selectionStart; render(); const n=$("shq"); n.focus(); n.setSelectionRange(pos,pos); }
   if (e.target.id==="catq"){ clearTimeout(qTimer); qTimer = setTimeout(async () => { S.cat.q = e.target.value; await loadCatalog(true); const pos = e.target.selectionStart; renderHome(); const n=$("catq"); n.focus(); n.setSelectionRange(pos,pos); }, 280); }
   if (e.target.id==="tocq"){ S.tocq = e.target.value; const pos = e.target.selectionStart; renderToc(); const n=$("tocq"); n.focus(); n.setSelectionRange(pos,pos); }
 });
@@ -1543,6 +1674,11 @@ document.addEventListener("click", async e => {
   const t = e.target.closest("button, .unit, [data-goto]");
   if (t && t.dataset.drstage !== undefined && t.closest(".drseg")){ S.drStage = t.dataset.drstage; S.draftsDoneAll = false; render(); return; }
   if (t && t.id==="draftsdoneall"){ S.draftsDoneAll = true; render(); return; }
+  if (t && t.dataset.claim){
+    try { await api("/api/gremium/claim", {id:+t.dataset.claim, approve:!!t.dataset.ok}); toast(t.dataset.ok ? "Übernahme bestätigt" : "Antrag abgelehnt"); S.gremium = null; await refresh(); } catch(err){ toast(err.message); }
+    return;
+  }
+  if (t && t.id==="shall"){ S.shAll = true; render(); return; }
   if (t && t.id==="vresend"){
     try { const r = await api("/api/verify-resend", {}); toast(`Neuer Link an ${r.email} gesendet.`); } catch(err){ toast(err.message); }
     return;
@@ -1579,7 +1715,7 @@ document.addEventListener("click", async e => {
       try { const f = await api("/api/follows"); S.followList = f.follows; } catch(e){}
       if (S.page==="konto"){ await loadActivity(); renderPage(); } else if (S.panel==="account") renderPanel(); return;
     }
-    if (t.id==="stellungnahme"){ showDraft(stellungnahme(), "Beiträge als Stellungnahme"); return; }
+    if (t.id==="stellungnahme"){ showDraft(stellungnahme(), "Als Stellungnahme an das Parlament exportieren"); return; }
     if (t.dataset.whole){ if (S.formType!=="del") S.formBefore = S.formType; S.formType = "del"; selectUnit(t.dataset.whole); return; }
     if (t.dataset.pkgadd){ if (!S.pkgs) await loadAll(); S.formFor = {cid:+t.dataset.pkgadd, kind:"pkg"}; rerenderForms(); return; }
     if (t.dataset.copy!==undefined){ await copyText(t.dataset.copy); return; }
@@ -1674,6 +1810,12 @@ document.addEventListener("submit", async e => {
   e.preventDefault();
   const id = e.target.id;
   const v = x => ($(x)||{}).value?.trim() || "";
+  if (id==="hubsearch"){ const q = v("hubq"); Object.assign(S.cat, {q, g:"", idx:"", sort:"", browse:!q}); await loadCatalog(true); go("#/recht"); return; }
+  if (id==="claimform"){
+    try { await api("/api/stakeholder/claim", {id:S.sh.id, note:v("claimnote")}); toast("Antrag gestellt. Das Gremium prüft."); S.sh = await api("/api/stakeholder?id="+S.sh.id); renderPage(); }
+    catch(err){ toast(err.message); }
+    return;
+  }
   if (id==="loginform" || id==="regform"){
     const err = $("aerr");
     try {
