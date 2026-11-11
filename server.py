@@ -942,7 +942,7 @@ def need(cond, code, msg):
     if not cond: raise ApiError(code, msg)
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "OffenesRecht/2.1.1"
+    server_version = "OffenesRecht/2.1.2"
 
     def log_message(self, fmt, *a):
         # bewusst ohne IP-Adresse (Datenschutz); Fehlersuche über Pfad und Status
@@ -1605,8 +1605,10 @@ def r_catalog(h):
              "changes": "COALESCE(n_changes,0) DESC, kurztitel", "old": "COALESCE(stf_year,9999), kurztitel", "eu": "COALESCE(n_celex,0) DESC, kurztitel"}.get(q.get("sort"), "kurztitel COLLATE NOCASE")
     off = max(0, int(q.get("offset") or 0)); lim = min(200, max(1, int(q.get("limit") or 60)))
     total = c.execute("SELECT COUNT(*) FROM laws" + w, args).fetchone()[0]
-    rows = c.execute(f"""SELECT l.gnr,l.kurztitel,l.abk,l.typ,l.tgroup,l.idx,l.inkraft,l.n_norms,l.n_changes,l.n_celex,l.stf_year,
-                         (SELECT COUNT(*) FROM contributions WHERE key LIKE l.gnr||'/%' AND removed_at IS NULL) nc FROM laws l {w} ORDER BY {order} LIMIT ? OFFSET ?""",
+    # Beitragszahl je Rechtsvorschrift einmal gruppiert statt je Zeile per LIKE (vorher Sekunden bei vielen Beiträgen)
+    rows = c.execute(f"""WITH cnt AS (SELECT substr(key,1,8) g, COUNT(*) n FROM contributions WHERE removed_at IS NULL GROUP BY 1)
+                         SELECT l.gnr,l.kurztitel,l.abk,l.typ,l.tgroup,l.idx,l.inkraft,l.n_norms,l.n_changes,l.n_celex,l.stf_year,
+                         COALESCE(cnt.n,0) nc FROM laws l LEFT JOIN cnt ON cnt.g=l.gnr {w} ORDER BY {order} LIMIT ? OFFSET ?""",
                      args + [lim, off]).fetchall()
     m = {r["k"]: r["v"] for r in c.execute("SELECT * FROM meta")}
     groups = {r["tgroup"]: r["n"] for r in c.execute("SELECT tgroup, COUNT(*) n FROM laws WHERE tgroup!='me' GROUP BY tgroup")}
@@ -1657,7 +1659,7 @@ def r_norm(h):
 # mit API-Schlüssel (Authorization: Bearer …). REST und MCP verwenden dieselben Kernfunktionen.
 from urllib.parse import unquote
 
-APP_VERSION = "2.1.1"
+APP_VERSION = "2.1.2"
 READ_LIMIT_PER_MIN = int(os.environ.get("OR_API_READ_LIMIT", "120"))
 WRITE_LIMIT_PER_HOUR = int(os.environ.get("OR_API_WRITE_HOUR", "20"))
 WRITE_LIMIT_PER_DAY = int(os.environ.get("OR_API_WRITE_DAY", "100"))
