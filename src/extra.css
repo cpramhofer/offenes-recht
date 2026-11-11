@@ -512,3 +512,11 @@ dialog.sharedlg .why{margin:10px 0 0}
 .widerspruch .wkbar p{margin:0;max-width:80ch}
 .widerspruch .wkh{font-size:16px;margin:8px 0 4px}
 .debatte .widerspruch .t-weniger{color:#8A4200}.debatte .widerspruch .t-mehr{color:#1D4F8C}.debatte .widerspruch .t-praez{color:#4A5263}
+/* 2.2 Gliederung der Entwürfe */
+.toc .dtoc{list-style:none;margin:2px 0 8px;padding:0 0 0 8px;border-left:1px solid var(--rule)}
+.toc .dtoc li a{display:flex;justify-content:space-between;gap:8px;text-decoration:none;color:var(--ink);padding:4px 8px;border-radius:4px;font-size:13px;line-height:1.35}
+.toc .dtoc li.l1 a{font-weight:600;margin-top:6px;font-size:12.5px;color:var(--muted)}
+.toc .dtoc li.l2 a{padding-left:14px}
+.toc .dtoc li a:hover{background:var(--bg,#F5F6F8)}
+.toc .dtoc li a[aria-current="true"]{background:#F9E3E6;color:#8A0E22}
+.toc .dtoc .dn{font-size:11px;color:var(--muted);background:#EEF0F3;border-radius:9px;padding:0 6px;align-self:center}

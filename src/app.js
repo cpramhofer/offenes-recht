@@ -41,7 +41,8 @@ function unitLabel(key){
   if (pid==="gesetz") return "Gesamte Rechtsvorschrift";
   const n = S.norms.find(x => x.pid===pid);
   if (rest[0]==="ganz") return (n ? n.label : pid) + " (gesamt)";
-  if (/^9/.test(gnr) && S.texts[pid]){ const u = S.texts[pid].units.find(x => x.a===rest.join("/")); return (n ? n.label : pid) + (u && u.n ? " · "+u.n : ""); }
+  if (/^9/.test(gnr) && S.texts[pid]){ const a = rest.join("/"), pl = (S.texts[pid].places||{})[a]; if (pl) return pl;
+    const u = S.texts[pid].units.find(x => x.a===a); return (n ? n.label : pid) + (u && u.n ? " · "+u.n : ""); }
   let l = n ? n.label : pid;
   rest.forEach(p => {
     let m;
@@ -597,6 +598,17 @@ async function loadTopLaws(){ try { S.topLaws = (await api("/api/catalog?sort=co
 
 // ---- Gesetzesansicht
 function countBy(pid){ return S.data.filter(c => !c.removed && c.key.split("/")[1]===pid).length; }
+// Gliederung eines Entwurfs: Artikel, darunter Novellierungspunkte bzw. Paragraphen (vom Server aus Text und Erläuterungen)
+function draftToc(pid){
+  const b = S.texts[pid]; if (!b || !b.toc || !b.toc.length || pid!==S.pid) return "";
+  const pos = {}; b.units.forEach((u,i) => pos[u.a] = i);
+  const starts = b.toc.map(e => pos[e.a]), selA = S.sel && S.sel.split("/")[1]===pid ? S.sel.split("/").slice(2).join("/") : null, selPos = selA!=null ? pos[selA] : -1;
+  const cnt = {}; S.data.filter(c => !c.removed && c.key.split("/")[1]===pid).forEach(c => { const p_ = pos[c.key.split("/").slice(2).join("/")]; if (p_!==undefined) cnt[p_] = (cnt[p_]||0)+1; });
+  const range = i => { const a = starts[i]; let e = b.units.length; for (let j = i+1; j < b.toc.length; j++) if (b.toc[j].level <= b.toc[i].level){ e = starts[j]; break; } return [a, e]; };
+  let cur = -1; b.toc.forEach((e,i) => { if (e.level===2 && starts[i] <= selPos) cur = i; });
+  return `<ol class="dtoc">${b.toc.map((e,i) => { const [a, z] = range(i); let n = 0; for (let k = a; k < z; k++) n += cnt[k]||0;
+    return `<li class="l${e.level}"><a href="#/g/${S.gnr}/${pid}/${esc(e.a)}" aria-current="${i===cur}">${esc(e.label)}${n?`<span class="dn">${n}</span>`:""}</a></li>`; }).join("")}</ol>`;
+}
 function renderToc(){
   if (S.mode!=="law" || !S.law){ $("toc").innerHTML = ""; return; }
   const q = S.tocq.trim().toLowerCase();
@@ -611,7 +623,7 @@ function renderToc(){
     <input id="tocq" type="search" placeholder="§ oder Stichwort" value="${esc(S.tocq)}" aria-label="Im Inhaltsverzeichnis suchen">
     <div class="why">${nf(S.norms.length)} Normen${loading?` · Überschriften werden geladen (${nf(loading)} offen)`:""}</div>
     <ol class="toclist">${list.map(n => { const c = countBy(n.pid), on = c ? Math.max(1, Math.round(c/max*5)) : 0;
-      return `<li><button data-pid="${n.pid}" aria-current="${n.pid===S.pid}"><span class="pn">${esc(n.label)}</span><span class="pt">${esc(n.title||"")}</span><span class="heat" title="${c} Beiträge">${[1,2,3,4,5].map(k=>`<i class="${k<=on?"on":""}"></i>`).join("")}</span></button></li>`; }).join("")}</ol>
+      return `<li><button data-pid="${n.pid}" aria-current="${n.pid===S.pid}"><span class="pn">${esc(n.label)}</span><span class="pt">${esc(n.title||"")}</span><span class="heat" title="${c} Beiträge">${[1,2,3,4,5].map(k=>`<i class="${k<=on?"on":""}"></i>`).join("")}</span></button>${isDraftLaw() && !q ? draftToc(n.pid) : ""}</li>`; }).join("")}</ol>
     <div class="navbtns">${isDraftLaw() ? `<a class="btn" href="#/debatte/${S.law.gnr}">Debatte: Streitpunkte und Positionen</a><a class="btn ghost" href="#/debatte/${S.law.gnr}/stellungnahmen">Stellungnahmen${dr && dr.statements_parliament!=null ? ` (${dr.statements_parliament})` : ""}</a>` : ""}<button class="btn ghost" id="ovbtn">Top-Vorschläge in ${isDraftLaw()?"diesem Entwurf":"diesem Gesetz"}</button>${isDraftLaw() ? `<button class="btn ghost" id="stellungnahme">Als Stellungnahme an das Parlament exportieren</button>` : (() => { const wk = `${S.gnr}/gesetz/ganz`, nc = S.data.filter(x => !x.removed && x.key===wk).length;
       return `<button class="btn ghost" data-whole="${wk}">Ganze Rechtsvorschrift aufheben${nc?` (${nc})`:""}</button>`; })()}</div>`;
   const cur = $("toc").querySelector('[aria-current="true"]'); if (cur && !q) cur.scrollIntoView({block:"nearest"});

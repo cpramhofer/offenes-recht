@@ -356,7 +356,9 @@ def key_label(c, key, _cache={}):
         if not r or not r["body"]: return out + parts[1]
         ck = (parts[0], parts[1], r["fetched"])
         if ck not in _cache:                                    # einheitliche Zitierweise der Entwurfsstellen (siehe draft_places)
-            _cache[ck] = draft_places(json.loads(r["body"])["units"], erl=(parts[1] == "erl"))[0]
+            e = c.execute("SELECT body FROM norms WHERE gnr=? AND pid='erl'", (parts[0],)).fetchone() if parts[1] != "erl" else None
+            _cache[ck] = draft_places(json.loads(r["body"])["units"], erl=(parts[1] == "erl"),
+                                      hints=erl_hints(json.loads(e["body"])["units"]) if e and e["body"] else None)[0]
         pl = _cache[ck].get("/".join(parts[2:]))
         if pl: return out + pl["full"]
         return out + r["label"]
@@ -942,7 +944,7 @@ def need(cond, code, msg):
     if not cond: raise ApiError(code, msg)
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "OffenesRecht/2.1.2"
+    server_version = "OffenesRecht/2.2"
 
     def log_message(self, fmt, *a):
         # bewusst ohne IP-Adresse (Datenschutz); Fehlersuche über Pfad und Status
@@ -1652,6 +1654,13 @@ def r_norm(h):
     try: body = fetch_norm(r["nor"])
     except Exception: raise ApiError(502, "Das RIS antwortet gerade nicht. Bitte später erneut versuchen.")
     words = sum(len(u["t"].split()) for u in body.get("units", []))
+    if gnr.startswith("9") and body.get("units"):
+        hints = None
+        if pid != "erl":
+            e = db().execute("SELECT body FROM norms WHERE gnr=? AND pid='erl'", (gnr,)).fetchone()
+            hints = erl_hints(json.loads(e["body"])["units"]) if e and e["body"] else None
+        pl = draft_places(body["units"], erl=(pid == "erl"), hints=hints)[0]
+        body = {**body, "toc": draft_toc(body["units"], erl=(pid == "erl"), hints=hints), "places": {a: v["full"] for a, v in pl.items()}}
     return {"pid": pid, "label": r["label"], "inkraft": r["inkraft"], "nor": r["nor"], "kundmachung": last_change(r["kundmachung"]) if (r["kundmachung"] and len(_BGBL_RE.findall(r["kundmachung"])) > 1) else None, "words": words, **body}
 
 # ---------- Öffentliche API v1 und MCP-Server ----------
@@ -1659,7 +1668,7 @@ def r_norm(h):
 # mit API-Schlüssel (Authorization: Bearer …). REST und MCP verwenden dieselben Kernfunktionen.
 from urllib.parse import unquote
 
-APP_VERSION = "2.1.2"
+APP_VERSION = "2.2"
 READ_LIMIT_PER_MIN = int(os.environ.get("OR_API_READ_LIMIT", "120"))
 WRITE_LIMIT_PER_HOUR = int(os.environ.get("OR_API_WRITE_HOUR", "20"))
 WRITE_LIMIT_PER_DAY = int(os.environ.get("OR_API_WRITE_DAY", "100"))
@@ -2024,7 +2033,20 @@ def _short(t, n=160):
     t = re.sub(r"\s+", " ", t or "").strip()
     return t if len(t) <= n else t[:n].rsplit(" ", 1)[0] + " …"
 
-def draft_places(units, erl=False):
+def erl_hints(units):
+    """Aus den Erläuterungen: (Art., Z) → betroffene Bestimmung, z. B. ('Art. 2', 'Z 2') → '§ 73c'. Verlässlicher als der Novellierungstext."""
+    hints, art = {}, None
+    for u in units or []:
+        n, t = (u.get("n") or "").strip(), (u.get("t") or "").strip()
+        m = re.match(r"^Zu\s+Art(?:ikel|\.)\s*(\d+[a-z]?)\b", t) if not n else None
+        if m: art = "Art. " + m.group(1); continue
+        m = re.match(r"^Zu\s+Z\s*(\d+[a-z]?)\s*\((.*)\):?$", n or t)
+        if m:
+            inner = re.sub(r"^Änderung(?:en)? der\s+", "", m.group(2).replace("„neu“", "")).strip()
+            hints.setdefault((art, "Z " + m.group(1)), inner)
+    return hints
+
+def draft_places(units, erl=False, hints=None):
     """Einheitliche Zitierweise der Stellen eines Entwurfs (Legistische Richtlinien):
     Artikel „Art. 2“, Novellierungsanordnung „Z 11“, betroffene Bestimmung „§ 423 Abs. 2“; Erläuterungen „Erl. zu Art. 2 Z 11“."""
     out, art, art_title, z_para, sect = {}, None, {}, {}, None
@@ -2051,15 +2073,53 @@ def draft_places(units, erl=False):
         zm = next((re.match(r"^Pkt\.\s*(\S+)", x) for x in parts if x.startswith("Pkt.")), None)
         z = ("Z " + zm.group(1)) if zm else None
         bez = next((x for x in parts if x.startswith("§") or x.startswith("Abs.")), None)
+        if z and (art, z) not in z_para and hints and hints.get((art, z)):
+            z_para[(art, z)] = hints[(art, z)]
         if z and (art, z) not in z_para:
             pm = (re.search(r"folgende[rn]?\s+(?:neue[rn]?\s+)?(§\s*\d+[a-z]*)", t) or re.search(r"(§§?\s*\d+[a-z]*)", t))
             z_para[(art, z)] = re.sub(r"\s+", " ", pm.group(1).replace("§§", "§")) if pm else None
         para = z_para.get((art, z)) if z else None
-        if bez and bez.startswith("Abs.") and para: bez = para + " " + bez
+        if bez and bez.startswith("Abs.") and para:
+            pb = re.match(r"(§\s*\d+[a-z]*)", para); bez = (pb.group(1) if pb else para) + " " + bez
         short = bez or (f"{z} ({para})" if z and para else z) or n
+        out_z, out_para = z, (para or (re.match(r"(§\s*\d+[a-z]*)", bez).group(1) if bez and bez.startswith("§") else None))
         full = " ".join(x for x in (art, z) if x) + (f" ({bez})" if bez and z else (f" ({para})" if z and para else ((" " + bez) if bez else "")))
-        out[u["a"]] = {"art": art, "short": short, "full": full or n}
+        out[u["a"]] = {"art": art, "short": short, "full": full or n, "z": out_z, "para": out_para}
     return out, art_title
+
+def draft_toc(units, erl=False, hints=None):
+    """Gliederung eines Entwurfs für die linke Spalte: Artikel (bzw. Abschnitte der Erläuterungen), darunter Novellierungspunkte bzw. Paragraphen."""
+    places, art_title = draft_places(units, erl, hints)
+    toc, last1, last2 = [], None, None
+    for u in units:
+        pl = places.get(u["a"]) or {}; n, t = (u.get("n") or "").strip(), (u.get("t") or "").strip()
+        if not n:                                   # Überschriften
+            if erl:
+                m = re.match(r"^Zu\s+Art(?:ikel|\.)\s*(\d+[a-z]?)\s*(?:\((.*?)\))?:?$", t)
+                if m: lab = "Art. " + m.group(1) + ((" · " + m.group(2)) if m.group(2) else "")
+                elif t in ("Allgemeiner Teil", "Kompetenzgrundlage", "Besonderer Teil"): lab = t
+                else: continue
+            else:
+                art = pl.get("art")
+                if not art or art == last1: continue
+                lab = art + ((" · " + art_title[art]) if art_title.get(art) else ""); last1 = art
+            if lab != (toc[-1]["label"] if toc and toc[-1]["level"] == 1 else None):
+                toc.append({"a": u["a"], "level": 1, "label": lab}); last2 = None
+            continue
+        if erl:
+            m = re.match(r"^Zu\s+Z\s*(\d+[a-z]?)\s*(?:\((.*?)\))?:?$", n)
+            if not m: continue
+            inner = re.sub(r"^Änderung(?:en)? der\s+", "", (m.group(2) or "").replace("„neu“", "")).strip()
+            lab = "Z " + m.group(1) + ((" · " + inner) if inner else "")
+        else:
+            if pl.get("z"): lab = pl["z"] + ((" · " + pl["para"]) if pl.get("para") else "")
+            elif pl.get("para"): lab = pl["para"]
+            else: continue
+            if pl.get("art") and pl["art"] != last1:
+                toc.append({"a": u["a"], "level": 1, "label": pl["art"] + ((" · " + art_title[pl["art"]]) if art_title.get(pl["art"]) else "")}); last1 = pl["art"]; last2 = None
+        if lab != last2:
+            toc.append({"a": u["a"], "level": 2, "label": lab}); last2 = lab
+    return toc
 
 def debate(gnr, user=None, public=False):
     c = db(); need(re.fullmatch(r"\d{8}", gnr or ""), 400, "gnr: Gesetzesnummer mit 8 Ziffern.")
@@ -2070,11 +2130,12 @@ def debate(gnr, user=None, public=False):
     # Reihenfolge der Stellen: Norm, dann Einheit im Normtext
     norms = {r["pid"]: r for r in c.execute("SELECT pid, label, sort, body FROM norms WHERE gnr=?", (gnr,))}
     upos, ulab, places, art_titles = {}, {}, {}, {}
+    hints = erl_hints(json.loads(norms["erl"]["body"])["units"]) if is_draft and "erl" in norms and norms["erl"]["body"] else None
     for pid, n in norms.items():
         units = json.loads(n["body"])["units"] if n["body"] else []
         for i, u in enumerate(units): upos[(pid, u["a"])] = i; ulab[(pid, u["a"])] = u["n"]
         if is_draft:
-            pl, at = draft_places(units, erl=(pid == "erl"))
+            pl, at = draft_places(units, erl=(pid == "erl"), hints=hints)
             for a, v in pl.items(): places[(pid, a)] = v
             if pid != "erl": art_titles.update(at)
     def unit_of(key): p = key.split("/"); return "/".join(p[:3]) if len(p) >= 3 else key
