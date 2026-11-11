@@ -508,3 +508,7 @@ dialog.sharedlg .why{margin:10px 0 0}
 .stakeholder .dplace{font-family:var(--f-mono,ui-monospace,monospace);font-size:12.5px;color:var(--accent)}
 @media (max-width:900px){.widerspruch .wkwrap{grid-template-columns:1fr}.widerspruch .wkside{position:static}}
 @media (max-width:600px){.widerspruch .wkax-row,.widerspruch .wkax-head{grid-template-columns:1fr}.widerspruch .wkax-head{display:none}.widerspruch .z-praez,.widerspruch .z-mehr{justify-content:flex-start}}
+.widerspruch .wkbar{display:flex;gap:16px;align-items:flex-start;justify-content:space-between;flex-wrap:wrap}
+.widerspruch .wkbar p{margin:0;max-width:80ch}
+.widerspruch .wkh{font-size:16px;margin:8px 0 4px}
+.debatte .widerspruch .t-weniger{color:#8A4200}.debatte .widerspruch .t-mehr{color:#1D4F8C}.debatte .widerspruch .t-praez{color:#4A5263}

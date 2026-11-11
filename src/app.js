@@ -79,12 +79,7 @@ async function route(){
     catch(e){ S.verify = {state:"error", msg:e.message}; }
     render(); hit("other"); return;
   }
-  if (p[0]==="widerspruch" && /^\d{8}$/.test(p[1]||"")){
-    S.mode = "home"; S.page = "widerspruch"; S.gnr = null; S.law = null; if (S.panel==="anchor") S.panel = "default";
-    if (!S.wk || S.wk.gnr!==p[1]){ S.wk = null; S.wkSel = null; render();
-      try { S.wk = await api("/api/conflicts?gnr="+p[1]); wkLayout(S.wk); } catch(e){ S.wk = {error:e.message, gnr:p[1]}; } }
-    render(); window.scrollTo(0,0); hit("widerspruch", p[1]); return;
-  }
+  if (p[0]==="widerspruch" && /^\d{8}$/.test(p[1]||"")){ location.replace("#/debatte/"+p[1]+"/karte"); return; }
   if (p[0]==="stellungnehmer" && /^\d+$/.test(p[1]||"")){
     S.mode = "home"; S.page = "stellungnehmer"; S.gnr = null; S.law = null; if (S.panel==="anchor") S.panel = "default";
     S.sh = null; render();
@@ -95,7 +90,9 @@ async function route(){
     const fresh = S.page !== "debatte" || S.debGnr !== p[1];
     S.page = "debatte"; S.mode = "home"; S.gnr = null; S.law = null; if (S.panel==="anchor") S.panel = "default";
     if (S.debGnr !== p[1]){ S.debGnr = p[1]; S.deb = null; S.debOpen = null; S.debTab = "streit"; }
-    S.debTab = ["streit","einig","weitere","legistik","matrix","stellungnahmen"].includes(p[2]) ? p[2] : (fresh ? "streit" : S.debTab);
+    S.debTab = ["streit","einig","weitere","legistik","matrix","karte","stellungnahmen"].includes(p[2]) ? p[2] : (fresh ? "streit" : S.debTab);
+    if (S.debTab==="karte" && (!S.wk || S.wk.gnr!==p[1])){ S.wk = null; S.wkSel = null;
+      api("/api/conflicts?gnr="+p[1]).then(j => { S.wk = j; wkLayout(S.wk); if (S.page==="debatte") renderPage(); }).catch(e => { S.wk = {error:e.message, gnr:p[1]}; if (S.page==="debatte") renderPage(); }); }
     if (S.debTab==="stellungnahmen" && (!S.debSn || S.debSn.gnr!==p[1])) api("/api/statements?gnr="+p[1]).then(j => { S.debSn = j; if (S.page==="debatte") renderPage(); }).catch(()=>{});
     if (!S.all) await loadAll().catch(()=>{});
     render(); if (fresh || !S.deb) { await loadDebate(); render(); }
@@ -280,7 +277,7 @@ function renderAcct(){
 function renderShell(){
   document.body.dataset.mode = S.mode; updateSide();
   const area = S.mode==="law" ? (isDraftLaw() ? "begutachtung" : "recht")
-    : S.page==="debatte" || S.page==="stellungnehmer" || S.page==="widerspruch" ? "begutachtung" : S.page==="zahlen" || S.page==="paket" ? "recht"
+    : S.page==="debatte" || S.page==="stellungnehmer" ? "begutachtung" : S.page==="zahlen" || S.page==="paket" ? "recht"
     : S.page==="projekt" ? "projekt" : S.page==="api" ? "api" : S.page ? "" : S.area==="home" ? "" : S.area;
   document.querySelectorAll(".mainnav a[data-area]").forEach(a => a.setAttribute("aria-current", a.dataset.area===area ? "page" : "false"));
   const vb = $("vbar"), nv = S.user && S.user.email_verified===false;
@@ -434,7 +431,7 @@ function renderBegutachtung(){
         <a class="paddr" href="#/debatte/${d.gnr}">${esc(d.title)}</a>
         <div class="ddstats"><span class="${d.contested?"hot":""}"><b>${d.contested}</b> ${d.contested===1?"Streitpunkt":"Streitpunkte"}</span><span><b>${d.agreed}</b> einig</span><span><b>${d.voices}</b> ${d.voices===1?"Stellungnehmer":"Stellungnehmer"}</span></div>
         ${d.top.length ? `<ul class="ddtop">${d.top.map(g => `<li><a href="#/debatte/${d.gnr}" data-debfocus="${g.id}">${esc(g.title)}</a>${debBar(g.counts)}</li>`).join("")}</ul>` : `<div class="why">${d.without_stance ? "Noch keine Streitpunkte: Die Beiträge sind noch nicht nach Richtung eingeordnet." : "Keine Streitpunkte."}</div>`}
-        <div class="row"><a class="btn" href="#/debatte/${d.gnr}">Debatte ansehen</a>${d.voices >= 2 ? `<a class="btn ghost" href="#/widerspruch/${d.gnr}">Widerspruchskarte</a>` : ""}<a class="btn ghost" href="#/debatte/${d.gnr}/stellungnahmen">Stellungnahmen${d.statements!=null?` (${d.statements})`:""}</a></div>
+        <div class="row"><a class="btn" href="#/debatte/${d.gnr}">Debatte ansehen</a><a class="btn ghost" href="#/debatte/${d.gnr}/stellungnahmen">Stellungnahmen${d.statements!=null?` (${d.statements})`:""}</a></div>
       </article>`).join("")}</div>` : `<div class="empty">Noch keine Debatten.</div>`;
   } else {
     const q = (S.shq||"").trim().toLowerCase(), list = (S.shs||[]).filter(x => !q || x.name.toLowerCase().includes(q));
@@ -470,10 +467,10 @@ function wkLayout(m){
   m.nodes.forEach(n => { n.x = 110 + (x1>x0 ? (n.x-x0)/(x1-x0) : .5)*(W-220); n.y = 70 + (y1>y0 ? (n.y-y0)/(y1-y0) : .5)*(H-140); });
   m.E = E; m.W = W; m.H = H;
 }
-function renderWiderspruch(){
-  const m = S.wk;
-  if (!m) return `<article class="legal doc"><div class="lbl">Widerspruchskarte</div><h1>Lade …</h1></article>`;
-  if (m.error) return `<article class="legal doc"><div class="lbl">Widerspruchskarte</div><h1>Nicht verfügbar</h1><p>${esc(m.error)}</p></article>`;
+function wkBody(m){
+  if (!m) return `<div class="empty">Lade …</div>`;
+  if (m.error) return `<div class="empty">${esc(m.error)}</div>`;
+  const F = S.wkFilter || "alle", vis = e => F==="alle" || (F==="gegen" ? e.kind!=="gleich" : e.kind==="gleich");
   const ST = {weniger:"zurücknehmen", praez:"präzisieren", mehr:"ausweiten", "±":"beides", "":"ohne Richtung"};
   const fill = n => n.lean > .25 ? "#2F6DB5" : n.lean < -.25 ? "#C8701E" : "#8A93A3";
   const short = t => t.length > 26 ? t.slice(0, 24).replace(/[\s,;-]+$/,"") + "…" : t;
@@ -482,7 +479,7 @@ function renderWiderspruch(){
   const svg = m.nodes.length < 2 ? `<div class="empty">Für eine Karte braucht es mindestens zwei Stellungnehmer mit eingeordneten Positionen.</div>` :
     `<svg class="wkmap" viewBox="0 0 ${m.W} ${m.H}" role="img" aria-label="Netz der Stellungnehmer: ${m.nodes.length} Knoten, ${m.E.length} Verbindungen">
       <text x="16" y="22" class="wkaxis">← eher zurücknehmen</text><text x="${m.W-16}" y="22" class="wkaxis" text-anchor="end">eher ausweiten →</text>
-      ${m.E.map((e,i) => { const a = m.nodes[e.s], b = m.nodes[e.t];
+      ${m.E.map((e,i) => { if (!vis(e)) return ""; const a = m.nodes[e.s], b = m.nodes[e.t];
         return `<line x1="${a.x.toFixed(1)}" y1="${a.y.toFixed(1)}" x2="${b.x.toFixed(1)}" y2="${b.y.toFixed(1)}" class="wke k-${e.kind}${on(e)?"":" dim"}${selEdge===e?" sel":""}" stroke-width="${(1.5+e.n*1.5).toFixed(1)}"/>
           <line x1="${a.x.toFixed(1)}" y1="${a.y.toFixed(1)}" x2="${b.x.toFixed(1)}" y2="${b.y.toFixed(1)}" class="wkhit" data-wedge="${i}"><title>${esc(e.a)} – ${esc(e.b)}: ${e.kind==="gegen"?"gegenläufig":e.kind==="gleich"?"gleiche Richtung":"ausdrückliche Bezugnahme"} (${e.n})</title></line>`; }).join("")}
       ${m.nodes.map((n,i) => { const dim = sel && !(selNode===n || (selNode && m.E.some(e => on(e) && (m.nodes[e.s]===n || m.nodes[e.t]===n))) || (selEdge && (m.nodes[selEdge.s]===n || m.nodes[selEdge.t]===n)));
@@ -512,17 +509,12 @@ function renderWiderspruch(){
       <div class="wkax-row"><div class="z z-weniger">${col.weniger.concat(col["±"]).map(x => `<span>${esc(x)}</span>`).join("") || "–"}</div>
         <div class="z z-praez">${col.praez.concat(col[""]).map(x => `<span>${esc(x)}</span>`).join("") || "–"}</div>
         <div class="z z-mehr">${col.mehr.concat(col["±"]).map(x => `<span>${esc(x)}</span>`).join("") || "–"}</div></div></div>`; }).join("");
-  return `<article class="legal doc konto widerspruch">
-    <div class="lbl"><a href="#/begutachtung/debatten">Begutachtung › Debatten</a> · ${esc(m.abbreviation||"")}</div>
-    <h1>Widerspruchskarte</h1>
-    <div class="kmeta"><a class="paddr" href="#/debatte/${m.gnr}">${esc(m.title)}</a></div>
-    <p class="why">Jeder Kreis ist ein Stellungnehmer; je größer, desto mehr Argumente. Die Farbe zeigt die überwiegende Richtung (orange: zurücknehmen, grau: präzisieren, blau: ausweiten), die Lage von links nach rechts ebenso. <b class="wk-gegen-t">Rote Linien</b> verbinden Stellungnehmer mit gegenläufigen Positionen am selben Streitpunkt, <b class="wk-gleich-t">gestrichelte Linien</b> solche mit gleicher Richtung; je dicker, desto mehr gemeinsame Streitpunkte.</p>
+  return `<div class="widerspruch">
+    <div class="wkbar"><p class="why">Jeder Kreis ist ein Stellungnehmer, je größer, desto mehr Argumente. Farbe und Lage zeigen die überwiegende Richtung: <b class="t-weniger">zurücknehmen</b> links, <b class="t-praez">präzisieren</b> in der Mitte, <b class="t-mehr">ausweiten</b> rechts. Rote Linien verbinden gegenläufige Positionen am selben Streitpunkt, gestrichelte die gleiche Richtung; je dicker, desto mehr gemeinsame Streitpunkte.</p>
+      <div class="seg" role="group" aria-label="Linien">${[["alle","Alle Linien"],["gegen","Nur Widersprüche"],["gleich","Nur gleiche Richtung"]].map(([k,l]) => `<button data-wkf="${k}" aria-pressed="${F===k}">${l}</button>`).join("")}</div></div>
     <div class="wkwrap"><div class="wkfig">${svg}</div><aside class="wkside" aria-live="polite">${side}</aside></div>
-    ${axis ? `<h2>Wer steht wo, je Streitpunkt</h2><div class="wkax-head"><span>Zurücknehmen</span><span>Präzisieren</span><span>Ausweiten</span></div>${axis}` : ""}
-    <h2>Als Liste</h2>
-    <div class="tablewrap"><table class="dt"><thead><tr><th scope="col">Stellungnehmer</th><th scope="col">Stellungnehmer</th><th scope="col">Beziehung</th><th scope="col">Streitpunkte</th></tr></thead>
-      <tbody>${m.E.map(e => `<tr><td>${esc(e.a)}</td><td>${esc(e.b)}</td><td>${e.kind==="gegen"?"gegenläufig":e.kind==="gleich"?"gleiche Richtung":"ausdrücklich"}</td><td>${esc(e.issues.join(", "))}</td></tr>`).join("")}</tbody></table></div>
-  </article>`;
+    ${axis ? `<h2 class="wkh">Wer steht wo, je Streitpunkt</h2><div class="wkax-head"><span>Zurücknehmen</span><span>Präzisieren</span><span>Ausweiten</span></div>${axis}` : ""}
+  </div>`;
 }
 function renderStakeholder(){
   const k = S.sh;
@@ -1253,7 +1245,7 @@ function renderDebatte(){
   const by = k => d.issues.filter(g => g.kind===k);
   const weitere = d.issues.filter(g => g.kind==="mehrere" || g.kind==="anregung");
   const left = daysLeft(d.deadline);
-  const TABS = [["streit",`Strittig (${sm.contested})`],["einig",`Einigkeit (${sm.agreed})`],["weitere",`Weitere Anregungen (${weitere.length})`],["legistik",`Legistisches (${sm.legistic})`],["matrix","Wer steht wo"]].concat(d.draft ? [["stellungnahmen",`Stellungnahmen${d.statements!=null?` (${d.statements})`:""}`]] : []);
+  const TABS = [["streit",`Strittig (${sm.contested})`],["einig",`Einigkeit (${sm.agreed})`],["weitere",`Weitere Anregungen (${weitere.length})`],["legistik",`Legistisches (${sm.legistic})`],["matrix","Wer steht wo"]].concat(d.draft ? [["karte","Widerspruchskarte"],["stellungnahmen",`Stellungnahmen${d.statements!=null?` (${d.statements})`:""}`]] : []);
   const tiles = [["streit",sm.contested,"Streitpunkte","Positionen widersprechen einander","strittig"],["einig",sm.agreed,"Einigkeit","Gleiche Richtung, keine Gegenstimme","einig"],
                  ["matrix",sm.organizations,"Stellungnehmer","Organisationen, Behörden, Personen","stimmen"],["legistik",sm.legistic,"Legistisch","Formale Korrekturen","legistik"]];
   let body = "";
@@ -1261,6 +1253,7 @@ function renderDebatte(){
       ${by("strittig").map(g => debIssue(g, st)).join("") || `<div class="empty">Noch keine Streitpunkte. Streit wird erkannt, wenn Beiträge eine Richtung angeben und einander widersprechen.</div>`}`;
   else if (tab==="einig") body = by("einig").map(g => debIssue(g, st)).join("") || `<div class="empty">Noch keine Punkte, bei denen sich mehrere Stimmen in dieselbe Richtung einig sind.</div>`;
   else if (tab==="weitere") body = weitere.map(g => debIssue(g, st)).join("") || `<div class="empty">Keine weiteren Anregungen.</div>`;
+  else if (tab==="karte") body = wkBody(S.wk);
   else if (tab==="stellungnahmen"){
     const sn = S.debSn && S.debSn.gnr===d.gnr ? S.debSn : null, ST = {weniger:"zurücknehmen", praez:"präzisieren", mehr:"ausweiten"};
     body = !sn ? `<div class="empty">Lade …</div>` : `<p class="why">Alle beim Parlament eingebrachten Stellungnahmen zu diesem Entwurf. ${sn.captured} von ${sn.statements.length} sind auf der Plattform als Beiträge erfasst.</p>
@@ -1284,7 +1277,7 @@ function renderDebatte(){
     <h1>${esc(d.title)}</h1>
     <div class="kmeta">${d.draft && left!==null ? `<span class="pill ${left<=3?"s-umstritten":"s-diskutiert"}">${left<0?"Begutachtung abgeschlossen":left===0?"Begutachtungsfrist endet heute":`Begutachtung noch ${left} ${left===1?"Tag":"Tage"}`}</span>` : ""}
       ${d.statements!=null?`<span class="chip static">${d.statements} Stellungnahmen beim Parlament</span>`:""}<span class="chip static">${sm.contributions} Beiträge · ${sm.arguments} Argumente</span>
-      ${d.draft ? `<a class="btn sm" href="#/widerspruch/${d.gnr}">Widerspruchskarte</a>` : ""}<a class="linkbtn subtle" href="#/g/${d.gnr}">Zum ${d.draft?"Entwurfstext":"Text"}</a>${followBtn("law", d.gnr, "linkbtn subtle")}${shareBtn("/e/"+d.gnr)}</div>
+<a class="linkbtn subtle" href="#/g/${d.gnr}">Zum ${d.draft?"Entwurfstext":"Text"}</a>${followBtn("law", d.gnr, "linkbtn subtle")}${shareBtn("/e/"+d.gnr)}</div>
     <div class="hero dtiles">${tiles.map(([k,n,l,sub,cls]) => `<button data-debtab="${k}" class="dk-tile ${cls}"><b>${n}</b><span class="tl">${l}</span><span class="sub">${sub}</span></button>`).join("")}</div>
     ${sm.without_stance ? `<p class="dnote why">${sm.without_stance} von ${sm.contributions} Beiträgen haben noch keine Richtung und zählen daher weder als Streit noch als Einigkeit. Verfasserinnen, Verfasser und Bots können sie nachträglich einordnen (API und MCP: <code>annotate_contribution</code>).</p>` : ""}
     <section class="dmap" aria-labelledby="dmap-h"><div class="khead"><h2 id="dmap-h">Streitkarte</h2>
@@ -1303,7 +1296,6 @@ function renderPage(){
   else if (S.page==="gremium") html = renderGremiumPage();
   else if (S.page==="debatte") html = renderDebatte();
   else if (S.page==="stellungnehmer") html = renderStakeholder();
-  else if (S.page==="widerspruch") html = renderWiderspruch();
   else if (S.page==="bestaetigen") html = S.verify.state==="loading" ? `<article class="legal"><div class="lbl">Konto</div><h1>E-Mail-Adresse wird bestätigt …</h1></article>`
     : S.verify.state==="ok" ? `<article class="legal"><div class="lbl">Konto</div><h1>E-Mail-Adresse bestätigt</h1><p>Danke${S.verify.name?", "+esc(S.verify.name):""}. Sie können jetzt Beiträge schreiben, bewerten und Inhalten folgen.</p>
         <div class="row" style="display:flex;gap:8px;flex-wrap:wrap">${S.user ? `<a class="btn" href="#/">Zur Startseite</a>` : `<button class="btn" data-open="login">Anmelden</button>`}</div></article>`
@@ -1753,7 +1745,7 @@ document.addEventListener("input", e => {
 });
 document.addEventListener("click", e => {
   const wn = e.target.closest("[data-wnode],[data-wedge]");
-  if (wn && S.page==="widerspruch"){ const n = wn.dataset.wnode, ed = wn.dataset.wedge;
+  if (wn && S.page==="debatte" && S.debTab==="karte"){ const n = wn.dataset.wnode, ed = wn.dataset.wedge;
     S.wkSel = n!==undefined ? {type:"n", i:+n} : {type:"e", i:+ed}; renderPage(); return; }
   const df = e.target.closest("a[data-debfocus]"); if (df) S.debFocus = df.dataset.debfocus;
   const ks = e.target.closest("a[data-ksecgo]"); if (ks) S.kontoSec = ks.dataset.ksecgo;
@@ -1771,6 +1763,7 @@ document.addEventListener("click", async e => {
   const t = e.target.closest("button, .unit, [data-goto]");
   if (t && t.dataset.drstage !== undefined && t.closest(".drseg")){ S.drStage = t.dataset.drstage; S.draftsDoneAll = false; render(); return; }
   if (t && t.id==="draftsdoneall"){ S.draftsDoneAll = true; render(); return; }
+  if (t && t.dataset.wkf){ S.wkFilter = t.dataset.wkf; renderPage(); return; }
   if (t && t.dataset.wclear!==undefined){ S.wkSel = null; renderPage(); return; }
   if (t && t.dataset.claim){
     try { await api("/api/gremium/claim", {id:+t.dataset.claim, approve:!!t.dataset.ok}); toast(t.dataset.ok ? "Übernahme bestätigt" : "Antrag abgelehnt"); S.gremium = null; await refresh(); } catch(err){ toast(err.message); }
