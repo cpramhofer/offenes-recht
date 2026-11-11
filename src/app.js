@@ -79,6 +79,12 @@ async function route(){
     catch(e){ S.verify = {state:"error", msg:e.message}; }
     render(); hit("other"); return;
   }
+  if (p[0]==="widerspruch" && /^\d{8}$/.test(p[1]||"")){
+    S.mode = "home"; S.page = "widerspruch"; S.gnr = null; S.law = null; if (S.panel==="anchor") S.panel = "default";
+    if (!S.wk || S.wk.gnr!==p[1]){ S.wk = null; S.wkSel = null; render();
+      try { S.wk = await api("/api/conflicts?gnr="+p[1]); wkLayout(S.wk); } catch(e){ S.wk = {error:e.message, gnr:p[1]}; } }
+    render(); window.scrollTo(0,0); hit("widerspruch", p[1]); return;
+  }
   if (p[0]==="stellungnehmer" && /^\d+$/.test(p[1]||"")){
     S.mode = "home"; S.page = "stellungnehmer"; S.gnr = null; S.law = null; if (S.panel==="anchor") S.panel = "default";
     S.sh = null; render();
@@ -274,7 +280,7 @@ function renderAcct(){
 function renderShell(){
   document.body.dataset.mode = S.mode; updateSide();
   const area = S.mode==="law" ? (isDraftLaw() ? "begutachtung" : "recht")
-    : S.page==="debatte" || S.page==="stellungnehmer" ? "begutachtung" : S.page==="zahlen" || S.page==="paket" ? "recht"
+    : S.page==="debatte" || S.page==="stellungnehmer" || S.page==="widerspruch" ? "begutachtung" : S.page==="zahlen" || S.page==="paket" ? "recht"
     : S.page==="projekt" ? "projekt" : S.page==="api" ? "api" : S.page ? "" : S.area==="home" ? "" : S.area;
   document.querySelectorAll(".mainnav a[data-area]").forEach(a => a.setAttribute("aria-current", a.dataset.area===area ? "page" : "false"));
   const vb = $("vbar"), nv = S.user && S.user.email_verified===false;
@@ -428,7 +434,7 @@ function renderBegutachtung(){
         <a class="paddr" href="#/debatte/${d.gnr}">${esc(d.title)}</a>
         <div class="ddstats"><span class="${d.contested?"hot":""}"><b>${d.contested}</b> ${d.contested===1?"Streitpunkt":"Streitpunkte"}</span><span><b>${d.agreed}</b> einig</span><span><b>${d.voices}</b> ${d.voices===1?"Stellungnehmer":"Stellungnehmer"}</span></div>
         ${d.top.length ? `<ul class="ddtop">${d.top.map(g => `<li><a href="#/debatte/${d.gnr}" data-debfocus="${g.id}">${esc(g.title)}</a>${debBar(g.counts)}</li>`).join("")}</ul>` : `<div class="why">${d.without_stance ? "Noch keine Streitpunkte: Die Beiträge sind noch nicht nach Richtung eingeordnet." : "Keine Streitpunkte."}</div>`}
-        <div class="row"><a class="btn" href="#/debatte/${d.gnr}">Debatte ansehen</a><a class="btn ghost" href="#/debatte/${d.gnr}/stellungnahmen">Stellungnahmen${d.statements!=null?` (${d.statements})`:""}</a></div>
+        <div class="row"><a class="btn" href="#/debatte/${d.gnr}">Debatte ansehen</a>${d.voices >= 2 ? `<a class="btn ghost" href="#/widerspruch/${d.gnr}">Widerspruchskarte</a>` : ""}<a class="btn ghost" href="#/debatte/${d.gnr}/stellungnahmen">Stellungnahmen${d.statements!=null?` (${d.statements})`:""}</a></div>
       </article>`).join("")}</div>` : `<div class="empty">Noch keine Debatten.</div>`;
   } else {
     const q = (S.shq||"").trim().toLowerCase(), list = (S.shs||[]).filter(x => !q || x.name.toLowerCase().includes(q));
@@ -439,6 +445,84 @@ function renderBegutachtung(){
       ${list.length > 100 && !S.shAll ? `<button class="linkbtn strong" id="shall">Alle ${list.length} anzeigen</button>` : ""}`;
   }
   $("law").innerHTML = areaHead("begutachtung", "Begutachtung", "Gesetzesentwürfe der Ministerien vor dem Beschluss, mit den Stellungnahmen und der Debatte dazu.", BTABS, tab) + `<div class="areabody">${body}</div>`;
+}
+// ---- Widerspruchskarte: Kräfte-Layout ohne Bibliothek, deterministisch
+function wkLayout(m){
+  const N = m.nodes.length, W = 900, H = 560, cx = W/2, cy = H/2, idx = {};
+  m.nodes.forEach((n,i) => { idx[n.name] = i; const a = 2*Math.PI*i/Math.max(1,N); n.x = cx + 220*Math.cos(a); n.y = cy + 170*Math.sin(a); n.vx = 0; n.vy = 0;
+    const s = n.stances, t = (s.weniger||0)+(s.praez||0)+(s.mehr||0); n.lean = t ? ((s.mehr||0)-(s.weniger||0))/t : 0;
+    n.r = 9 + Math.sqrt(n.arguments)*5; });
+  const E = m.edges.map(e => ({...e, s: idx[e.a], t: idx[e.b]})).filter(e => e.s!==undefined && e.t!==undefined);
+  for (let it = 0; it < 400; it++){
+    const k = 1 - it/400;
+    for (let i = 0; i < N; i++) for (let j = i+1; j < N; j++){
+      const a = m.nodes[i], b = m.nodes[j]; let dx = b.x-a.x, dy = b.y-a.y, d2 = dx*dx+dy*dy || 1, d = Math.sqrt(d2);
+      const f = 9000/d2; dx/=d; dy/=d; a.vx -= f*dx; a.vy -= f*dy; b.vx += f*dx; b.vy += f*dy; }
+    E.forEach(e => { const a = m.nodes[e.s], b = m.nodes[e.t]; let dx = b.x-a.x, dy = b.y-a.y, d = Math.sqrt(dx*dx+dy*dy)||1;
+      const want = e.kind==="gleich" ? 110 : e.kind==="bezug" ? 170 : 300, f = (d-want)*0.02*Math.min(3, e.n); dx/=d; dy/=d;
+      a.vx += f*dx; a.vy += f*dy; b.vx -= f*dx; b.vy -= f*dy; });
+    m.nodes.forEach(n => { n.vx += (cx + n.lean*260 - n.x)*0.012; n.vy += (cy - n.y)*0.004;      // Richtung: links zurücknehmen, rechts ausweiten
+      n.x += n.vx*k*0.5; n.y += n.vy*k*0.5; n.vx *= .6; n.vy *= .6;
+      n.x = Math.max(70, Math.min(W-70, n.x)); n.y = Math.max(40, Math.min(H-40, n.y)); });
+  }
+  // auf die Fläche strecken: Lage bleibt, Leerraum verschwindet
+  const xs = m.nodes.map(n => n.x), ys = m.nodes.map(n => n.y), x0 = Math.min(...xs), x1 = Math.max(...xs), y0 = Math.min(...ys), y1 = Math.max(...ys);
+  m.nodes.forEach(n => { n.x = 110 + (x1>x0 ? (n.x-x0)/(x1-x0) : .5)*(W-220); n.y = 70 + (y1>y0 ? (n.y-y0)/(y1-y0) : .5)*(H-140); });
+  m.E = E; m.W = W; m.H = H;
+}
+function renderWiderspruch(){
+  const m = S.wk;
+  if (!m) return `<article class="legal doc"><div class="lbl">Widerspruchskarte</div><h1>Lade …</h1></article>`;
+  if (m.error) return `<article class="legal doc"><div class="lbl">Widerspruchskarte</div><h1>Nicht verfügbar</h1><p>${esc(m.error)}</p></article>`;
+  const ST = {weniger:"zurücknehmen", praez:"präzisieren", mehr:"ausweiten", "±":"beides", "":"ohne Richtung"};
+  const fill = n => n.lean > .25 ? "#2F6DB5" : n.lean < -.25 ? "#C8701E" : "#8A93A3";
+  const short = t => t.length > 26 ? t.slice(0, 24).replace(/[\s,;-]+$/,"") + "…" : t;
+  const sel = S.wkSel, selNode = sel && sel.type==="n" ? m.nodes[sel.i] : null, selEdge = sel && sel.type==="e" ? m.E[sel.i] : null;
+  const on = (e) => !sel || (selNode && (m.nodes[e.s]===selNode || m.nodes[e.t]===selNode)) || (selEdge && e===selEdge);
+  const svg = m.nodes.length < 2 ? `<div class="empty">Für eine Karte braucht es mindestens zwei Stellungnehmer mit eingeordneten Positionen.</div>` :
+    `<svg class="wkmap" viewBox="0 0 ${m.W} ${m.H}" role="img" aria-label="Netz der Stellungnehmer: ${m.nodes.length} Knoten, ${m.E.length} Verbindungen">
+      <text x="16" y="22" class="wkaxis">← eher zurücknehmen</text><text x="${m.W-16}" y="22" class="wkaxis" text-anchor="end">eher ausweiten →</text>
+      ${m.E.map((e,i) => { const a = m.nodes[e.s], b = m.nodes[e.t];
+        return `<line x1="${a.x.toFixed(1)}" y1="${a.y.toFixed(1)}" x2="${b.x.toFixed(1)}" y2="${b.y.toFixed(1)}" class="wke k-${e.kind}${on(e)?"":" dim"}${selEdge===e?" sel":""}" stroke-width="${(1.5+e.n*1.5).toFixed(1)}"/>
+          <line x1="${a.x.toFixed(1)}" y1="${a.y.toFixed(1)}" x2="${b.x.toFixed(1)}" y2="${b.y.toFixed(1)}" class="wkhit" data-wedge="${i}"><title>${esc(e.a)} – ${esc(e.b)}: ${e.kind==="gegen"?"gegenläufig":e.kind==="gleich"?"gleiche Richtung":"ausdrückliche Bezugnahme"} (${e.n})</title></line>`; }).join("")}
+      ${m.nodes.map((n,i) => { const dim = sel && !(selNode===n || (selNode && m.E.some(e => on(e) && (m.nodes[e.s]===n || m.nodes[e.t]===n))) || (selEdge && (m.nodes[selEdge.s]===n || m.nodes[selEdge.t]===n)));
+        return `<g class="wkn${dim?" dim":""}${selNode===n?" sel":""}" data-wnode="${i}" tabindex="0" role="button" aria-label="${esc(n.name)}" transform="translate(${n.x.toFixed(1)},${n.y.toFixed(1)})"><circle r="${n.r.toFixed(1)}" fill="${fill(n)}"/>
+          <text y="${(n.r+14).toFixed(1)}" text-anchor="middle">${esc(short(n.name))}</text><title>${esc(n.name)}: ${n.arguments} ${n.arguments===1?"Argument":"Argumente"}</title></g>`; }).join("")}
+    </svg>`;
+  let side = `<p class="why">Klicken Sie auf einen Stellungnehmer oder eine Linie.</p>`;
+  if (selNode){
+    const ps = m.issues.map(g => ({g, p: g.positions.find(x => x.name===selNode.name)})).filter(x => x.p);
+    const rel = m.E.filter(e => m.nodes[e.s]===selNode || m.nodes[e.t]===selNode);
+    side = `<h3>${selNode.stakeholder_id ? `<a href="#/stellungnehmer/${selNode.stakeholder_id}">${esc(selNode.name)}</a>` : esc(selNode.name)}</h3>
+      <div class="why">${selNode.arguments} ${selNode.arguments===1?"Argument":"Argumente"}</div>
+      ${ps.length ? `<h4>Positionen</h4><ul class="wklist">${ps.map(x => `<li><span class="chip static st-${x.p.stance==="±"?"praez":x.p.stance}">${ST[x.p.stance]}</span> ${esc(x.g.title)}</li>`).join("")}</ul>` : ""}
+      ${rel.filter(e => e.kind!=="gleich").length ? `<h4>Widerspricht</h4><ul class="wklist">${rel.filter(e => e.kind!=="gleich").map(e => `<li><b>${esc(m.nodes[e.s]===selNode ? e.b : e.a)}</b>${e.kind==="bezug"?" (ausdrücklich)":""}: ${esc(e.issues.join(", "))}</li>`).join("")}</ul>` : ""}
+      ${rel.filter(e => e.kind==="gleich").length ? `<h4>Gleiche Richtung wie</h4><ul class="wklist">${rel.filter(e => e.kind==="gleich").map(e => `<li><b>${esc(m.nodes[e.s]===selNode ? e.b : e.a)}</b>: ${esc(e.issues.join(", "))}</li>`).join("")}</ul>` : ""}
+      <button class="linkbtn" data-wclear>Auswahl aufheben</button>`;
+  } else if (selEdge){
+    side = `<h3>${esc(selEdge.a)} <span class="why">und</span> ${esc(selEdge.b)}</h3>
+      <div class="pill ${selEdge.kind==="gleich"?"wk-gleich":"wk-gegen"}">${selEdge.kind==="gegen"?"gegenläufige Richtung":selEdge.kind==="gleich"?"gleiche Richtung":"ausdrückliche Bezugnahme"}</div>
+      <h4>Streitpunkte</h4><ul class="wklist">${selEdge.issues.map(t => `<li>${esc(t)}</li>`).join("")}</ul>
+      ${(selEdge.notes||[]).length ? `<h4>Worin</h4><ul class="wklist">${selEdge.notes.map(t => `<li>${esc(t)}</li>`).join("")}</ul>` : ""}
+      <button class="linkbtn" data-wclear>Auswahl aufheben</button>`;
+  }
+  const axis = m.issues.filter(g => g.kind==="strittig" || g.kind==="einig").map(g => {
+    const col = {weniger:[], praez:[], mehr:[], "±":[], "":[]}; g.positions.forEach(p => col[p.stance].push(p.name));
+    return `<div class="wkax"><div class="wkax-t"><b>${esc(g.title)}</b> <span class="pill dk-${g.kind}">${g.kind}</span></div>
+      <div class="wkax-row"><div class="z z-weniger">${col.weniger.concat(col["±"]).map(x => `<span>${esc(x)}</span>`).join("") || "–"}</div>
+        <div class="z z-praez">${col.praez.concat(col[""]).map(x => `<span>${esc(x)}</span>`).join("") || "–"}</div>
+        <div class="z z-mehr">${col.mehr.concat(col["±"]).map(x => `<span>${esc(x)}</span>`).join("") || "–"}</div></div></div>`; }).join("");
+  return `<article class="legal doc konto widerspruch">
+    <div class="lbl"><a href="#/begutachtung/debatten">Begutachtung › Debatten</a> · ${esc(m.abbreviation||"")}</div>
+    <h1>Widerspruchskarte</h1>
+    <div class="kmeta"><a class="paddr" href="#/debatte/${m.gnr}">${esc(m.title)}</a></div>
+    <p class="why">Jeder Kreis ist ein Stellungnehmer; je größer, desto mehr Argumente. Die Farbe zeigt die überwiegende Richtung (orange: zurücknehmen, grau: präzisieren, blau: ausweiten), die Lage von links nach rechts ebenso. <b class="wk-gegen-t">Rote Linien</b> verbinden Stellungnehmer mit gegenläufigen Positionen am selben Streitpunkt, <b class="wk-gleich-t">gestrichelte Linien</b> solche mit gleicher Richtung; je dicker, desto mehr gemeinsame Streitpunkte.</p>
+    <div class="wkwrap"><div class="wkfig">${svg}</div><aside class="wkside" aria-live="polite">${side}</aside></div>
+    ${axis ? `<h2>Wer steht wo, je Streitpunkt</h2><div class="wkax-head"><span>Zurücknehmen</span><span>Präzisieren</span><span>Ausweiten</span></div>${axis}` : ""}
+    <h2>Als Liste</h2>
+    <div class="tablewrap"><table class="dt"><thead><tr><th scope="col">Stellungnehmer</th><th scope="col">Stellungnehmer</th><th scope="col">Beziehung</th><th scope="col">Streitpunkte</th></tr></thead>
+      <tbody>${m.E.map(e => `<tr><td>${esc(e.a)}</td><td>${esc(e.b)}</td><td>${e.kind==="gegen"?"gegenläufig":e.kind==="gleich"?"gleiche Richtung":"ausdrücklich"}</td><td>${esc(e.issues.join(", "))}</td></tr>`).join("")}</tbody></table></div>
+  </article>`;
 }
 function renderStakeholder(){
   const k = S.sh;
@@ -458,6 +542,11 @@ function renderStakeholder(){
       <div class="why"><a href="${esc(x.url)}" target="_blank" rel="noopener">${esc(x.statement)}</a> · ${fmtIso(x.date)}${x.unit?` · ${esc(x.unit)}`:""}</div>
       <div class="why">${x.contributions ? `${x.contributions} ${x.contributions===1?"Beitrag":"Beiträge"} erfasst${Object.keys(x.stances).length ? ": "+Object.entries(x.stances).map(([s_,n]) => `${n} ${ST[s_]}`).join(", ") : ""}` : "Noch nicht auf der Plattform erfasst"}</div>
       ${x.issues.length ? `<div class="chips">${x.issues.map(i => `<span class="chip static">${esc(i)}</span>`).join("")}</div>` : ""}
+      ${x.items && x.items.length ? `<details class="shitems"${k.statements.length===1?" open":""}><summary>${x.items.length===1?"Den Beitrag":`Alle ${x.items.length} Beiträge`} ansehen</summary><ol>
+        ${x.items.map(it => `<li><div class="shi-head"><a class="dplace" href="#/g/${esc(it.key)}">${esc(it.place.replace(/^\S+\/ME\s+/, "").replace(/:$/, ""))}</a>
+          <span class="pill ${it.type==="Streichung"?"del":it.type==="proposal"?"prop":"com"}">${it.type==="Streichung"?"Streichung":it.type==="proposal"?"Änderungsvorschlag":"Kommentar"}</span>
+          ${it.stance?`<span class="chip static st-${it.stance}">${ST[it.stance]}</span>`:""}${it.issue?`<span class="why">${esc(it.issue)}</span>`:""}</div>
+          <p>${esc(it.summary)}</p></li>`).join("")}</ol></details>` : ""}
     </li>`).join("")}</ul>
     ${canClaim ? `<details class="botd claim"><summary>Das ist unsere Organisation</summary><form class="modform" id="claimform">
       <p class="why">Ihr Organisationskonto übernimmt diesen Eintrag. Das Gremium prüft den Antrag; danach erscheinen die Stellungnahmen als „geprüft“ und mit Ihrem Konto verbunden.</p>
@@ -1195,7 +1284,7 @@ function renderDebatte(){
     <h1>${esc(d.title)}</h1>
     <div class="kmeta">${d.draft && left!==null ? `<span class="pill ${left<=3?"s-umstritten":"s-diskutiert"}">${left<0?"Begutachtung abgeschlossen":left===0?"Begutachtungsfrist endet heute":`Begutachtung noch ${left} ${left===1?"Tag":"Tage"}`}</span>` : ""}
       ${d.statements!=null?`<span class="chip static">${d.statements} Stellungnahmen beim Parlament</span>`:""}<span class="chip static">${sm.contributions} Beiträge · ${sm.arguments} Argumente</span>
-      <a class="linkbtn subtle" href="#/g/${d.gnr}">Zum ${d.draft?"Entwurfstext":"Text"}</a>${followBtn("law", d.gnr, "linkbtn subtle")}${shareBtn("/e/"+d.gnr)}</div>
+      ${d.draft ? `<a class="btn sm" href="#/widerspruch/${d.gnr}">Widerspruchskarte</a>` : ""}<a class="linkbtn subtle" href="#/g/${d.gnr}">Zum ${d.draft?"Entwurfstext":"Text"}</a>${followBtn("law", d.gnr, "linkbtn subtle")}${shareBtn("/e/"+d.gnr)}</div>
     <div class="hero dtiles">${tiles.map(([k,n,l,sub,cls]) => `<button data-debtab="${k}" class="dk-tile ${cls}"><b>${n}</b><span class="tl">${l}</span><span class="sub">${sub}</span></button>`).join("")}</div>
     ${sm.without_stance ? `<p class="dnote why">${sm.without_stance} von ${sm.contributions} Beiträgen haben noch keine Richtung und zählen daher weder als Streit noch als Einigkeit. Verfasserinnen, Verfasser und Bots können sie nachträglich einordnen (API und MCP: <code>annotate_contribution</code>).</p>` : ""}
     <section class="dmap" aria-labelledby="dmap-h"><div class="khead"><h2 id="dmap-h">Streitkarte</h2>
@@ -1214,6 +1303,7 @@ function renderPage(){
   else if (S.page==="gremium") html = renderGremiumPage();
   else if (S.page==="debatte") html = renderDebatte();
   else if (S.page==="stellungnehmer") html = renderStakeholder();
+  else if (S.page==="widerspruch") html = renderWiderspruch();
   else if (S.page==="bestaetigen") html = S.verify.state==="loading" ? `<article class="legal"><div class="lbl">Konto</div><h1>E-Mail-Adresse wird bestätigt …</h1></article>`
     : S.verify.state==="ok" ? `<article class="legal"><div class="lbl">Konto</div><h1>E-Mail-Adresse bestätigt</h1><p>Danke${S.verify.name?", "+esc(S.verify.name):""}. Sie können jetzt Beiträge schreiben, bewerten und Inhalten folgen.</p>
         <div class="row" style="display:flex;gap:8px;flex-wrap:wrap">${S.user ? `<a class="btn" href="#/">Zur Startseite</a>` : `<button class="btn" data-open="login">Anmelden</button>`}</div></article>`
@@ -1652,12 +1742,19 @@ async function refresh(){ if (S.mode==="law") await loadState(); await loadAll()
 
 // ---- Ereignisse
 let qTimer = null;
+document.addEventListener("keydown", e => {
+  const wn = e.target.closest && e.target.closest("[data-wnode]");
+  if (wn && (e.key==="Enter" || e.key===" ")){ e.preventDefault(); S.wkSel = {type:"n", i:+wn.dataset.wnode}; renderPage(); const g = document.querySelector(`[data-wnode="${wn.dataset.wnode}"]`); if (g) g.focus(); }
+});
 document.addEventListener("input", e => {
   if (e.target.id==="shq"){ S.shq = e.target.value; const pos = e.target.selectionStart; render(); const n=$("shq"); n.focus(); n.setSelectionRange(pos,pos); }
   if (e.target.id==="catq"){ clearTimeout(qTimer); qTimer = setTimeout(async () => { S.cat.q = e.target.value; await loadCatalog(true); const pos = e.target.selectionStart; renderHome(); const n=$("catq"); n.focus(); n.setSelectionRange(pos,pos); }, 280); }
   if (e.target.id==="tocq"){ S.tocq = e.target.value; const pos = e.target.selectionStart; renderToc(); const n=$("tocq"); n.focus(); n.setSelectionRange(pos,pos); }
 });
 document.addEventListener("click", e => {
+  const wn = e.target.closest("[data-wnode],[data-wedge]");
+  if (wn && S.page==="widerspruch"){ const n = wn.dataset.wnode, ed = wn.dataset.wedge;
+    S.wkSel = n!==undefined ? {type:"n", i:+n} : {type:"e", i:+ed}; renderPage(); return; }
   const df = e.target.closest("a[data-debfocus]"); if (df) S.debFocus = df.dataset.debfocus;
   const ks = e.target.closest("a[data-ksecgo]"); if (ks) S.kontoSec = ks.dataset.ksecgo;
   const n = e.target.closest("a[data-nav]");
@@ -1674,6 +1771,7 @@ document.addEventListener("click", async e => {
   const t = e.target.closest("button, .unit, [data-goto]");
   if (t && t.dataset.drstage !== undefined && t.closest(".drseg")){ S.drStage = t.dataset.drstage; S.draftsDoneAll = false; render(); return; }
   if (t && t.id==="draftsdoneall"){ S.draftsDoneAll = true; render(); return; }
+  if (t && t.dataset.wclear!==undefined){ S.wkSel = null; renderPage(); return; }
   if (t && t.dataset.claim){
     try { await api("/api/gremium/claim", {id:+t.dataset.claim, approve:!!t.dataset.ok}); toast(t.dataset.ok ? "Übernahme bestätigt" : "Antrag abgelehnt"); S.gremium = null; await refresh(); } catch(err){ toast(err.message); }
     return;

@@ -467,3 +467,44 @@ dialog.sharedlg .why{margin:10px 0 0}
 .hubtile .hstats span{border:1px solid var(--rule);border-radius:8px;padding:9px 12px;background:var(--surface);display:flex;flex-direction:column;gap:1px;line-height:1.3}
 .hubtile .hstats b{font-family:var(--f-law);font-size:22px;margin:0}
 @media (max-width:760px){.hubtile .hstats{grid-template-columns:1fr 1fr}}
+/* 2.1 Widerspruchskarte, Beiträge der Stellungnehmer */
+.widerspruch .wkwrap{display:grid;grid-template-columns:minmax(0,1fr) 300px;gap:16px;align-items:start;margin:10px 0 24px}
+.widerspruch .wkfig{border:1px solid var(--rule);border-radius:10px;background:var(--surface);padding:6px}
+.wkmap{width:100%;height:auto;display:block;font-family:inherit}
+.wkmap .wkaxis{font-size:12px;fill:var(--muted)}
+.wkmap .wke{stroke-linecap:round}
+.wkmap .wke.k-gegen{stroke:#B3122C;opacity:.75}
+.wkmap .wke.k-gleich{stroke:#5B6372;stroke-dasharray:6 5;opacity:.6}
+.wkmap .wke.k-bezug{stroke:#8A0E22;stroke-dasharray:2 4;opacity:.9}
+.wkmap .wke.dim{opacity:.08}
+.wkmap .wke.sel{opacity:1}
+.wkmap .wkhit{stroke:transparent;stroke-width:14;cursor:pointer}
+.wkmap .wkn{cursor:pointer}
+.wkmap .wkn circle{stroke:#fff;stroke-width:2}
+.wkmap .wkn text{font-size:12px;fill:var(--ink);paint-order:stroke;stroke:#fff;stroke-width:4px;stroke-linejoin:round}
+.wkmap .wkn.dim{opacity:.25}
+.wkmap .wkn.sel circle,.wkmap .wkn:focus circle{stroke:var(--ink);stroke-width:3}
+.wkmap .wkn:focus{outline:none}
+.widerspruch .wkside{border:1px solid var(--rule);border-radius:10px;background:var(--surface);padding:14px 16px;font-size:13.5px;position:sticky;top:12px}
+.widerspruch .wkside h3{margin:0 0 4px;font-size:16px}
+.widerspruch .wkside h4{margin:12px 0 4px;font-size:12px;text-transform:uppercase;letter-spacing:.06em;color:var(--muted)}
+.widerspruch .wklist{margin:0;padding-left:18px;display:flex;flex-direction:column;gap:4px}
+.widerspruch .wk-gegen-t{color:#B3122C}.widerspruch .wk-gleich-t{color:#5B6372}
+.pill.wk-gegen{background:#F9E3E6;color:#8A0E22}.pill.wk-gleich{background:#EEF0F3;color:#4A5263}
+.chip.st-weniger{background:#FBEEDF;color:#8A4200;border-color:#E3B98C}.chip.st-praez{background:#EEF0F3;color:#4A5263}.chip.st-mehr{background:#E4EEF9;color:#1D4F8C;border-color:#9DB4D3}
+.widerspruch .wkax-head{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;font-size:12px;font-weight:600;margin:6px 0}
+.widerspruch .wkax-head span:nth-child(1){color:#8A4200}.widerspruch .wkax-head span:nth-child(2){color:#4A5263;text-align:center}.widerspruch .wkax-head span:nth-child(3){color:#1D4F8C;text-align:right}
+.widerspruch .wkax{border-top:1px solid var(--rule);padding:10px 0}
+.widerspruch .wkax-t{margin-bottom:6px;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+.widerspruch .wkax-row{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.widerspruch .wkax .z{border-radius:6px;padding:6px 8px;display:flex;flex-wrap:wrap;gap:4px;font-size:12.5px;min-height:32px;align-content:flex-start}
+.widerspruch .wkax .z span{background:var(--surface);border:1px solid var(--rule);border-radius:12px;padding:1px 8px}
+.widerspruch .z-weniger{background:#FBEEDF}.widerspruch .z-praez{background:#EEF0F3;justify-content:center}.widerspruch .z-mehr{background:#E4EEF9;justify-content:flex-end}
+.widerspruch .pill.dk-strittig{background:#B3122C;color:#fff}.widerspruch .pill.dk-einig{background:#2C7A4B;color:#fff}
+.stakeholder .shitems summary{cursor:pointer;font-weight:600;font-size:13.5px;margin-top:4px}
+.stakeholder .shitems ol{margin:8px 0 0;padding-left:20px;display:flex;flex-direction:column;gap:10px}
+.stakeholder .shitems p{margin:3px 0 0;font-size:13.5px;line-height:1.5}
+.stakeholder .shi-head{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.stakeholder .dplace{font-family:var(--f-mono,ui-monospace,monospace);font-size:12.5px;color:var(--accent)}
+@media (max-width:900px){.widerspruch .wkwrap{grid-template-columns:1fr}.widerspruch .wkside{position:static}}
+@media (max-width:600px){.widerspruch .wkax-row,.widerspruch .wkax-head{grid-template-columns:1fr}.widerspruch .wkax-head{display:none}.widerspruch .z-praez,.widerspruch .z-mehr{justify-content:flex-start}}

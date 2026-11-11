@@ -352,9 +352,14 @@ def key_label(c, key, _cache={}):
     out = ((law["abk"] or law["kurztitel"]) + " ") if law else ""
     if len(parts) > 1 and parts[1] == "gesetz": return out + "(gesamte Rechtsvorschrift)"
     if parts[0].startswith("9") and len(parts) > 2 and parts[2] != "ganz":
-        r = c.execute("SELECT label, body FROM norms WHERE gnr=? AND pid=?", (parts[0], parts[1])).fetchone()
-        u = next((u for u in json.loads(r["body"])["units"] if u["a"] == parts[2]), None) if r and r["body"] else None
-        return out + (r["label"] if r else parts[1]) + ((" · " + u["n"]) if u and u["n"] else "")
+        r = c.execute("SELECT label, body, fetched FROM norms WHERE gnr=? AND pid=?", (parts[0], parts[1])).fetchone()
+        if not r or not r["body"]: return out + parts[1]
+        ck = (parts[0], parts[1], r["fetched"])
+        if ck not in _cache:                                    # einheitliche Zitierweise der Entwurfsstellen (siehe draft_places)
+            _cache[ck] = draft_places(json.loads(r["body"])["units"], erl=(parts[1] == "erl"))[0]
+        pl = _cache[ck].get("/".join(parts[2:]))
+        if pl: return out + pl["full"]
+        return out + r["label"]
     out += n["label"] if n else (parts[1] if len(parts) > 1 else "")
     if parts[2:] == ["ganz"]: return out + " (gesamt)"
     for p in parts[2:]:
@@ -937,7 +942,7 @@ def need(cond, code, msg):
     if not cond: raise ApiError(code, msg)
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "OffenesRecht/2.0"
+    server_version = "OffenesRecht/2.1"
 
     def log_message(self, fmt, *a):
         # bewusst ohne IP-Adresse (Datenschutz); Fehlersuche über Pfad und Status
@@ -1652,7 +1657,7 @@ def r_norm(h):
 # mit API-Schlüssel (Authorization: Bearer …). REST und MCP verwenden dieselben Kernfunktionen.
 from urllib.parse import unquote
 
-APP_VERSION = "2.0"
+APP_VERSION = "2.1"
 READ_LIMIT_PER_MIN = int(os.environ.get("OR_API_READ_LIMIT", "120"))
 WRITE_LIMIT_PER_HOUR = int(os.environ.get("OR_API_WRITE_HOUR", "20"))
 WRITE_LIMIT_PER_DAY = int(os.environ.get("OR_API_WRITE_DAY", "100"))
@@ -2050,7 +2055,7 @@ def draft_places(units, erl=False):
         para = z_para.get((art, z)) if z else None
         if bez and bez.startswith("Abs.") and para: bez = para + " " + bez
         short = bez or (f"{z} ({para})" if z and para else z) or n
-        full = " ".join(x for x in (art, z) if x) + (f" ({bez})" if bez and z else ((" · " + bez) if bez else ""))
+        full = " ".join(x for x in (art, z) if x) + (f" ({bez})" if bez and z else (f" ({para})" if z and para else ((" " + bez) if bez else "")))
         out[u["a"]] = {"art": art, "short": short, "full": full or n}
     return out, art_title
 
@@ -2265,6 +2270,44 @@ def debate(gnr, user=None, public=False):
             "issues": out_groups, "map": list(rows_map.values()),
             "matrix": {"columns": [{"id": g["id"], "title": g["title"], "place": g["places"][0]["label"], "kind": g["kind"]} for g in cols], "rows": mrows}}
 
+def conflict_map(gnr):
+    """Netz der Stellungnehmer eines Entwurfs: gleiche bzw. gegenläufige Richtung an denselben Streitpunkten, ausdrückliche Bezugnahmen."""
+    d = debate(gnr, public=True)
+    nodes, edges, issues = {}, {}, []
+    for g in d["issues"]:
+        if g["kind"] == "legistik": continue
+        pos = {}
+        for a in g["arguments"]:
+            for i, o in enumerate(a["organizations"]):
+                sid = a["stakeholder_ids"][i] if i < len(a.get("stakeholder_ids") or []) else None
+                n = nodes.setdefault(o, {"name": o, "stakeholder_id": sid, "arguments": 0, "stances": {"weniger": 0, "praez": 0, "mehr": 0, "": 0}})
+                n["arguments"] += 1; n["stances"][a["stance"]] += 1
+                if sid and not n["stakeholder_id"]: n["stakeholder_id"] = sid
+                pos.setdefault(o, set()).add(a["stance"])
+        positions = [{"name": o, "stance": ("±" if {"weniger", "mehr"} <= ss else next((x for x in ("weniger", "mehr", "praez") if x in ss), ""))} for o, ss in pos.items()]
+        if len(pos) >= 2: issues.append({"id": g["id"], "title": g["title"], "kind": g["kind"], "positions": positions})
+        orgs = sorted(pos)
+        for i, x in enumerate(orgs):
+            for y in orgs[i + 1:]:
+                sx, sy = pos[x] - {""}, pos[y] - {""}
+                if ("weniger" in sx and "mehr" in sy) or ("mehr" in sx and "weniger" in sy): kind = "gegen"
+                elif (sx & sy) & {"weniger", "mehr"}: kind = "gleich"
+                else: continue
+                e = edges.setdefault((x, y, kind), {"a": x, "b": y, "kind": kind, "n": 0, "issues": []})
+                e["n"] += 1; e["issues"].append(g["title"])
+        for a in g["arguments"]:
+            for ref in a.get("responds_to") or []:
+                for x in a["organizations"]:
+                    for y in ref["organizations"]:
+                        if x == y: continue
+                        k = tuple(sorted((x, y))) + ("bezug",)
+                        e = edges.setdefault(k, {"a": k[0], "b": k[1], "kind": "bezug", "n": 0, "issues": [], "notes": []})
+                        e["n"] += 1; e["issues"].append(g["title"]); ref.get("note") and e["notes"].append(ref["note"])
+    return {"gnr": gnr, "title": d["title"], "abbreviation": d["abbreviation"], "draft": d["draft"], "url": f"{PUBLIC_URL}/#/widerspruch/{gnr}",
+            "nodes": sorted(nodes.values(), key=lambda n: -n["arguments"]), "edges": list(edges.values()), "issues": issues,
+            "summary": d["summary"]}
+
+def r_conflicts(h): return conflict_map(h.query.get("gnr", ""))
 def r_debate(h):
     return debate(h.query.get("gnr", ""), user=h.session_user())
 
@@ -2353,6 +2396,7 @@ def v1_post(h):
     return api_post(b, d.get("key"), d.get("type"), d.get("text"), d.get("reason") or d.get("why"), d.get("quote") or w.get("quote"),
                     d.get("goldplating"), d.get("celex"), deb_in(d))
 def v1_debate(h, gnr): _bot(h); return debate(gnr, public=True)
+def v1_conflicts(h, gnr): _bot(h); return conflict_map(gnr)
 def v1_statements(h, gnr): _bot(h); return statements_of(gnr, public=True)
 def v1_stakeholders(h): _bot(h); return stakeholders_list()
 def v1_stakeholder(h, sid): _bot(h); return stakeholder_view(int(sid))
@@ -2402,6 +2446,7 @@ API_PATTERNS = [
     ("GET", re.compile(r"^/api/v1/amending-acts$"), v1_acts),
     ("GET", re.compile(r"^/api/v1/laws/(\d{8})/debate$"), v1_debate),
     ("GET", re.compile(r"^/api/v1/drafts/(\d{8})/statements$"), v1_statements),
+    ("GET", re.compile(r"^/api/v1/laws/(\d{8})/conflicts$"), v1_conflicts),
     ("GET", re.compile(r"^/api/v1/stakeholders$"), v1_stakeholders),
     ("GET", re.compile(r"^/api/v1/stakeholders/(\d+)$"), v1_stakeholder),
     ("POST", re.compile(r"^/api/v1/contributions/(\d+)/annotate$"), v1_annotate),
@@ -3087,7 +3132,7 @@ def stakeholder_view(sid, user=None):
     sts = c.execute("""SELECT s.*, d.title, d.frist, d.active, d.stage, d.inkraft FROM statements s LEFT JOIN drafts d ON d.gnr=s.gnr
                        WHERE s.stakeholder_id=? AND s.public=1 ORDER BY s.date DESC""", (sid,)).fetchall()
     nrs = {r["nr"] for r in sts}; per = {}
-    for r in c.execute("SELECT id, key, sn_nr, stance, category, issue, summary, why, text FROM contributions WHERE sn_nr IS NOT NULL AND removed_at IS NULL"):
+    for r in c.execute("SELECT * FROM contributions WHERE sn_nr IS NOT NULL AND removed_at IS NULL ORDER BY key, id"):
         for nr in r["sn_nr"].split(", "):
             if nr in nrs: per.setdefault(nr, []).append(r)
     out = []
@@ -3097,7 +3142,9 @@ def stakeholder_view(sid, user=None):
             if x["stance"]: stc[x["stance"]] = stc.get(x["stance"], 0) + 1
         out.append({"statement": r["nr"], "date": r["date"], "url": r["url"], "unit": r["unit"], "gnr": r["gnr"], "draft": r["title"],
                     "draft_active": bool(r["active"]), "draft_stage": r["stage"], "contributions": len(cs), "stances": stc,
-                    "issues": sorted({x["issue"] for x in cs if x["issue"]})})
+                    "issues": sorted({x["issue"] for x in cs if x["issue"]}),
+                    "items": [{"id": x["id"], "key": x["key"], "place": key_label(c, x["key"]), "type": "Streichung" if x["op"] == "repeal" else TYPE_OUT.get(x["type"], x["type"]),
+                               "stance": deb_stance(x) or None, "category": x["category"], "issue": x["issue"], "summary": _short(deb_core(x), 300)} for x in cs]})
     claimer = c.execute("SELECT id, name FROM users WHERE id=?", (k["claimed_by"],)).fetchone() if k["claimed_by"] else None
     res = {"id": k["id"], "name": k["name"], "verified": k["claim_status"] == "approved",
            "account": {"id": claimer["id"], "name": claimer["name"]} if claimer and k["claim_status"] == "approved" else None,
@@ -3724,7 +3771,7 @@ def _today(ts=None):
     d = datetime.datetime.fromtimestamp(ts if ts is not None else time.time(), _TZ) if _TZ else datetime.datetime.fromtimestamp(ts or time.time())
     return d.date()
 
-HIT_PAGES = {"recht", "begutachtung", "stellungnehmer", "debatte", "home", "law", "draft", "paket", "zahlen", "projekt", "api", "moderation", "konto", "impressum", "datenschutz", "statistik", "other"}
+HIT_PAGES = {"widerspruch", "recht", "begutachtung", "stellungnehmer", "debatte", "home", "law", "draft", "paket", "zahlen", "projekt", "api", "moderation", "konto", "impressum", "datenschutz", "statistik", "other"}
 def bump(metric, n=1):
     try:
         c = db()
@@ -3963,7 +4010,7 @@ ROUTES = {
     ("POST", "/api/register"): r_register, ("POST", "/api/login"): r_login, ("POST", "/api/logout"): r_logout,
     ("POST", "/api/ack-key"): r_ack_key,
     ("POST", "/api/reset-request"): r_reset_request, ("POST", "/api/reset"): r_reset,
-    ("GET", "/api/statements"): r_statements, ("GET", "/api/debates"): r_debates, ("GET", "/api/stakeholders"): r_stakeholders, ("GET", "/api/stakeholder"): r_stakeholder,
+    ("GET", "/api/statements"): r_statements, ("GET", "/api/conflicts"): r_conflicts, ("GET", "/api/debates"): r_debates, ("GET", "/api/stakeholders"): r_stakeholders, ("GET", "/api/stakeholder"): r_stakeholder,
     ("POST", "/api/stakeholder/claim"): r_claim, ("POST", "/api/gremium/claim"): r_g_claim,
     ("POST", "/api/verify-email"): r_verify_email, ("POST", "/api/verify-resend"): r_verify_resend,
     ("POST", "/api/account/password"): r_change_pw, ("POST", "/api/account/delete"): r_delete_account,
