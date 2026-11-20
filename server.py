@@ -944,7 +944,7 @@ def need(cond, code, msg):
     if not cond: raise ApiError(code, msg)
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "OffenesRecht/2.2"
+    server_version = "OffenesRecht/2.3"
 
     def log_message(self, fmt, *a):
         # bewusst ohne IP-Adresse (Datenschutz); Fehlersuche über Pfad und Status
@@ -1668,7 +1668,7 @@ def r_norm(h):
 # mit API-Schlüssel (Authorization: Bearer …). REST und MCP verwenden dieselben Kernfunktionen.
 from urllib.parse import unquote
 
-APP_VERSION = "2.2"
+APP_VERSION = "2.3"
 READ_LIMIT_PER_MIN = int(os.environ.get("OR_API_READ_LIMIT", "120"))
 WRITE_LIMIT_PER_HOUR = int(os.environ.get("OR_API_WRITE_HOUR", "20"))
 WRITE_LIMIT_PER_DAY = int(os.environ.get("OR_API_WRITE_DAY", "100"))
@@ -2057,16 +2057,18 @@ def draft_places(units, erl=False, hints=None):
             if m: art = "Art. " + m.group(1); sect = None
             elif art and art not in art_title and not erl and t: art_title[art] = t.rstrip(":")
             elif erl and t and not t.startswith("Zu "): sect = t.rstrip(":"); art = None if t in ("Allgemeiner Teil", "Erläuterungen", "Kompetenzgrundlage") else art
-            out[u["a"]] = {"art": art, "short": "Überschrift" if art else (sect or "Titel"), "full": (art + " · Überschrift") if art else (sect or "Titel"), "heading": True}
+            lab = "Überschrift" if art else (sect or "Titel"); fl = (art + " · Überschrift") if art else (sect or "Titel")
+            out[u["a"]] = {"art": art, "short": lab, "full": fl, "heading": True, "cell": lab, "cellfull": fl}
             continue
         if erl:
             m = re.match(r"^Zu\s+Z\s*(\d+[a-z]?)\s*(?:\((.*)\))?:?$", n)
             if m:
                 inner = (m.group(2) or "").replace("„neu“", "").strip()
                 short = "Z " + m.group(1) + (f" ({inner})" if inner.startswith("§") else "")
-                out[u["a"]] = {"art": art, "short": short, "full": "Erl. zu " + ((art + " ") if art else "") + short}
+                full = "Erl. zu " + ((art + " ") if art else "") + short
+                out[u["a"]] = {"art": art, "short": short, "full": full, "cell": short, "cellfull": full}
             else:
-                lab = n.rstrip(":"); out[u["a"]] = {"art": None, "short": lab, "full": "Erl., " + lab}
+                lab = n.rstrip(":"); out[u["a"]] = {"art": None, "short": lab, "full": "Erl., " + lab, "cell": lab, "cellfull": "Erl., " + lab}
             continue
         parts = [x.strip() for x in n.split(" · ")]
         a_ = next((x for x in parts if x.startswith("Art.")), art); art = a_ or art
@@ -2084,7 +2086,9 @@ def draft_places(units, erl=False, hints=None):
         short = bez or (f"{z} ({para})" if z and para else z) or n
         out_z, out_para = z, (para or (re.match(r"(§\s*\d+[a-z]*)", bez).group(1) if bez and bez.startswith("§") else None))
         full = " ".join(x for x in (art, z) if x) + (f" ({bez})" if bez and z else (f" ({para})" if z and para else ((" " + bez) if bez else "")))
-        out[u["a"]] = {"art": art, "short": short, "full": full or n, "z": out_z, "para": out_para}
+        cell = (f"{z} ({para})" if para else z) if z else (out_para or short)       # Ziffer bzw. Paragraph, ohne Absätze
+        out[u["a"]] = {"art": art, "short": short, "full": full or n, "z": out_z, "para": out_para, "cell": cell,
+                       "cellfull": " ".join(x for x in (art, cell) if x)}
     return out, art_title
 
 def draft_toc(units, erl=False, hints=None):
@@ -2214,6 +2218,16 @@ def debate(gnr, user=None, public=False):
     for us in by_issue.values():
         for u in us[1:]: union(us[0], u)
     for l in links: union(unit_of(by_id[l["a"]]["key"]), unit_of(by_id[l["b"]]["key"]))
+    if is_draft:
+        by_cell = {}
+        for u in list(parent):
+            p_ = u.split("/"); pl = places.get((p_[1], "/".join(p_[2:]))) if len(p_) > 2 else None
+            if pl: by_cell.setdefault((p_[1], pl["art"], pl["cell"]), []).append(u)
+        for us in by_cell.values():
+            for u in us[1:]: union(us[0], u)
+    def cell_label(uk, full=False):
+        p_ = uk.split("/"); pl = places.get((p_[1], "/".join(p_[2:]))) if is_draft and len(p_) > 2 else None
+        return (pl["cellfull"] if full else pl["cell"]) if pl else unit_label(uk, short=not full)
     groups = {}
     for cl in clusters.values():
         g = groups.setdefault(find(cl["units"][0]), {"args": [], "units": set()})
@@ -2257,20 +2271,15 @@ def debate(gnr, user=None, public=False):
                     pair = {frozenset(A["org_keys"]), frozenset(B["org_keys"])}
                     if not any({A["id"], B["id"]} == {x["a"]["id"], x["b"]["id"]} or pair == {frozenset(x["a"]["org_keys"]), frozenset(x["b"]["org_keys"])} for x in contra):
                         contra.append({"a": A, "b": B, "note": None, "explicit": False})
-        cats = {a["category"].lower() for a in args if a["category"]}
-        if contra: kind = "strittig"
-        elif cats and all(a["category"] and a["category"].lower() == "legistik" for a in args): kind = "legistik"
-        elif len(okeys) >= 2 and len(st_set) == 1 and st_set & {"weniger", "mehr"}: kind = "einig"
-        elif len(okeys) >= 2: kind = "mehrere"
-        else: kind = "anregung"
         issue = next((cl_i for a in g["args"] for cl_i in sorted(a["issues"])), None)
         question = next((q for a in g["args"] for q in a["questions"]), None)
-        title = issue or unit_label(units[0]) + (f" und {len(units) - 1} weitere Stelle{'n' if len(units) > 2 else ''}" if len(units) > 1 else "")
+        cells = list(dict.fromkeys(cell_label(u, True) for u in units))
+        title = issue or cells[0] + (f" und {len(cells) - 1} weitere Stelle{'n' if len(cells) > 2 else ''}" if len(cells) > 1 else "")
         base = None
         if len(units) >= 1 and not units[0].endswith("/ganz"):
             base = unit_text(units[0])
         counts = {k: sum(1 for a in args if a["stance"] == k) for k in ("weniger", "praez", "mehr", "")}
-        out_groups.append({"id": "s%d" % min(gids), "kind": kind, "title": title, "issue": issue, "question": question,
+        out_groups.append({"id": "s%d" % min(gids), "title": title, "issue": issue, "question": question,
                            "places": [{"key": u, "label": unit_label(u), "url": web_url(u)} for u in units],
                            "text": _short(base, 1200) if base else None, "counts": counts, "organizations": len(okeys),
                            "arguments": args,
@@ -2283,12 +2292,18 @@ def debate(gnr, user=None, public=False):
         for a in g["arguments"]:
             a["responds_to"] = [{"id": cid_arg[l["b"]]["id"], "organizations": cid_arg[l["b"]]["organizations"], "note": l["note"]}
                                 for l in links if l["kind"] == "responds_to" and l["a"] in a["contributions"] and l["b"] in cid_arg]
-    order = {"strittig": 0, "mehrere": 1, "einig": 2, "anregung": 3, "legistik": 4}
-    out_groups.sort(key=lambda g: (order[g["kind"]], -g["organizations"], unit_sort(g["_units"][0])))
+    out_groups.sort(key=lambda g: unit_sort(g["_units"][0]))           # Reihenfolge im Text; keine Einstufung in strittig/einig
     # Streitkarte: jede kommentierte Stelle, nach Normen gruppiert
-    kind_of = {u: g["kind"] for g in out_groups for u in g["_units"]}; gid_of = {u: g["id"] for g in out_groups for u in g["_units"]}
+    gid_of = {u: g["id"] for g in out_groups for u in g["_units"]}
+    ucount = {}
+    for g in out_groups:
+        for a in g["arguments"]:
+            for i in a["contributions"]:
+                u = unit_of(by_id[i]["key"]); uc = ucount.setdefault(u, {"weniger": set(), "praez": set(), "mehr": set(), "": set()})
+                gid_of.setdefault(u, g["id"])                    # Argument über mehrere Stellen: Stelle zeigt auf seine Gruppe
+                uc[a["stance"]].add(a["id"])
+    kind_of = {u: True for u in ucount}
     rows_map = {}
-    sev = {"strittig": 0, "mehrere": 1, "einig": 2, "anregung": 3, "legistik": 4}
     for u in sorted(kind_of, key=unit_sort):
         p = u.split("/"); pid = p[1] if len(p) > 1 else ""
         n = norms.get(pid); lab = "Gesamte Rechtsvorschrift" if pid == "gesetz" else (n["label"] if n else pid)
@@ -2297,14 +2312,16 @@ def debate(gnr, user=None, public=False):
         if is_draft and pid == "erl": lab = ("Erläuterungen zu " + art) if art else "Erläuterungen"
         elif is_draft and art: lab = art + ((" · " + art_titles[art]) if art_titles.get(art) else "")
         row = rows_map.setdefault((pid, art), {"label": lab, "places": []})
-        short = unit_label(u, short=True)
+        short = cell_label(u)
         same = next((x for x in row["places"] if x["label"] == short), None)
-        if same:                                                   # mehrere Absätze derselben Stelle: ein Feld, die schärfere Einstufung zählt
-            if sev[kind_of[u]] < sev[same["kind"]]: same.update(kind=kind_of[u], group=gid_of[u], key=u)
+        if same:                                                   # mehrere Absätze derselben Stelle: ein Feld, Argumente zusammengezählt
+            for k in same["_c"]: same["_c"][k] |= ucount[u][k]
             continue
-        row["places"].append({"key": u, "label": short, "title": unit_label(u), "kind": kind_of[u], "group": gid_of[u]})
+        row["places"].append({"key": u, "label": short, "title": cell_label(u, True), "group": gid_of[u], "_c": {k: set(v) for k, v in ucount[u].items()}})
+    for row in rows_map.values():
+        for x in row["places"]: x["counts"] = {k: len(v) for k, v in x.pop("_c").items()}
     # Stakeholder-Matrix
-    cols = [g for g in out_groups if g["kind"] in ("strittig", "einig")][:10]
+    cols = sorted(sorted([g for g in out_groups if g["organizations"] >= 2], key=lambda g: -g["organizations"])[:10], key=lambda g: unit_sort(g["_units"][0]))
     sym = lambda ss: ("±" if {"weniger", "mehr"} <= ss else "+" if "mehr" in ss else "−" if "weniger" in ss else "~" if "praez" in ss else "•")
     mrows = []
     for k, o in orgs.items():
@@ -2318,8 +2335,8 @@ def debate(gnr, user=None, public=False):
     for g in out_groups:
         g.pop("_units"); g.pop("_okeys")
         for a in g["arguments"]: a.pop("org_keys", None)
-    kinds = [g["kind"] for g in out_groups]
     unplaced = sum(1 for r in rows if not deb_stance(r))
+    by_st = {k: sum(1 for g in out_groups for a in g["arguments"] if a["stance"] == k) for k in ("weniger", "praez", "mehr", "")}
     dr = c.execute("SELECT * FROM drafts WHERE gnr=?", (gnr,)).fetchone() if is_draft else None
     for g in out_groups:
         for a in g["arguments"]: a["key"] = by_id[a["id"]]["key"]
@@ -2328,17 +2345,16 @@ def debate(gnr, user=None, public=False):
             "url": f"{PUBLIC_URL}/#/debatte/{gnr}",
             "stances": {k: {"label": v, "hint": STANCE_SUB[k]} for k, v in STANCES.items()},
             "summary": {"contributions": len(rows), "arguments": sum(len(g["arguments"]) for g in out_groups),
-                        "organizations": len(mrows), "contested": kinds.count("strittig"), "agreed": kinds.count("einig"),
-                        "suggestions": kinds.count("anregung"), "several": kinds.count("mehrere"), "legistic": kinds.count("legistik"), "without_stance": unplaced},
+                        "organizations": len(mrows), "places": len(out_groups), "by_stance": by_st, "without_stance": unplaced},
             "issues": out_groups, "map": list(rows_map.values()),
-            "matrix": {"columns": [{"id": g["id"], "title": g["title"], "place": g["places"][0]["label"], "kind": g["kind"]} for g in cols], "rows": mrows}}
+            "matrix": {"columns": [{"id": g["id"], "title": g["title"], "place": g["places"][0]["label"], "organizations": g["organizations"]} for g in cols], "rows": mrows}}
 
 def conflict_map(gnr):
     """Netz der Stellungnehmer eines Entwurfs: gleiche bzw. gegenläufige Richtung an denselben Streitpunkten, ausdrückliche Bezugnahmen."""
     d = debate(gnr, public=True)
     nodes, edges, issues = {}, {}, []
     for g in d["issues"]:
-        if g["kind"] == "legistik": continue
+        if all((a["category"] or "").lower() == "legistik" for a in g["arguments"]): continue
         pos = {}
         for a in g["arguments"]:
             for i, o in enumerate(a["organizations"]):
@@ -2348,7 +2364,7 @@ def conflict_map(gnr):
                 if sid and not n["stakeholder_id"]: n["stakeholder_id"] = sid
                 pos.setdefault(o, set()).add(a["stance"])
         positions = [{"name": o, "stance": ("±" if {"weniger", "mehr"} <= ss else next((x for x in ("weniger", "mehr", "praez") if x in ss), ""))} for o, ss in pos.items()]
-        if len(pos) >= 2: issues.append({"id": g["id"], "title": g["title"], "kind": g["kind"], "positions": positions})
+        if len(pos) >= 2: issues.append({"id": g["id"], "title": g["title"], "positions": positions, "organizations": len(pos)})
         orgs = sorted(pos)
         for i, x in enumerate(orgs):
             for y in orgs[i + 1:]:
@@ -2641,7 +2657,7 @@ MCP_TOOLS = [
      "inputSchema": {"type": "object", "required": ["proposal_ids"], "properties": {
          "proposal_ids": {"type": "array", "items": {"type": "integer"}, "minItems": 1, "maxItems": 100}}}, "annotations": {**_RO, "title": "Entwurf erzeugen"}},
     {"name": "get_debate", "title": "Debatte zu einer Rechtsvorschrift oder einem Entwurf",
-     "description": "Verdichtet alle Beiträge zu Streitpunkten: Argumente je Richtung (weniger, präzisieren, mehr) mit Organisation und Quelle, Widersprüche, Einigkeit, Stakeholder-Matrix. Vor dem Eintragen neuer Stellungnahmen aufrufen, um Streitfragen (issue) wiederzuverwenden und Widersprüche zu verknüpfen.",
+     "description": "Verdichtet alle Beiträge je Stelle bzw. Streitfrage: Argumente je Richtung (weniger = zurücknehmen, praez = präzisieren, mehr = ausweiten) mit Stellungnehmer und Quelle, Verteilung der Richtungen je Stelle (map), Stakeholder-Matrix. Vor dem Eintragen neuer Stellungnahmen aufrufen, um Streitfragen (issue) wiederzuverwenden und Widersprüche zu verknüpfen.",
      "inputSchema": {"type": "object", "required": ["gnr"], "properties": {"gnr": _s("string", "Gesetzesnummer (8 Ziffern), bei Entwürfen beginnend mit 9")}},
      "annotations": {**_RO, "title": "Debatte"}},
     {"name": "list_statements", "title": "Stellungnahmen zu einem Entwurf",
@@ -3228,10 +3244,11 @@ def debates_list():
         sm = x["summary"]
         out.append({"gnr": d["gnr"], "nr": d["nr"], "title": d["title"], "ministry": d.get("ministry"), "ressort": d.get("ressort"), "active": d["active"],
                     "deadline": d["deadline"], "stage": d.get("stage"), "in_force_from": d.get("in_force_from"), "statements": d.get("statements_parliament"),
-                    "contested": sm["contested"], "agreed": sm["agreed"], "voices": sm["organizations"], "arguments": sm["arguments"],
+                    "by_stance": sm["by_stance"], "voices": sm["organizations"], "arguments": sm["arguments"],
                     "contributions": sm["contributions"], "without_stance": sm["without_stance"],
-                    "top": [{"id": g["id"], "title": g["title"], "organizations": g["organizations"], "counts": g["counts"]} for g in x["issues"] if g["kind"] == "strittig"][:3]})
-    out.sort(key=lambda d: (-d["contested"], -d["voices"], d["deadline"] or ""))
+                    "top": [{"id": g["id"], "title": g["title"], "organizations": g["organizations"], "counts": g["counts"]}
+                            for g in sorted(x["issues"], key=lambda g: -g["organizations"]) if g["organizations"] >= 2][:3]})
+    out.sort(key=lambda d: (-d["voices"], -d["arguments"], d["deadline"] or ""))
     res = {"debates": out}; _deb_cache["all"] = (time.time(), res); return res
 
 def r_debates(h): return debates_list()

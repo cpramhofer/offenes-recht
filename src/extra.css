@@ -520,3 +520,13 @@ dialog.sharedlg .why{margin:10px 0 0}
 .toc .dtoc li a:hover{background:var(--bg,#F5F6F8)}
 .toc .dtoc li a[aria-current="true"]{background:#F9E3E6;color:#8A0E22}
 .toc .dtoc .dn{font-size:11px;color:var(--muted);background:#EEF0F3;border-radius:9px;padding:0 6px;align-self:center}
+/* 2.3 Debatte nur nach Richtung */
+.debatte .dtiles.three{grid-template-columns:repeat(3,minmax(0,1fr))}
+.debatte .dk-tile.st-weniger b{color:#8A4200}.debatte .dk-tile.st-praez b{color:#4A5263}.debatte .dk-tile.st-mehr b{color:#1D4F8C}
+.debatte .dk-tile[aria-pressed="true"]{border-color:var(--ink);box-shadow:inset 0 0 0 1px var(--ink)}
+.debatte .dcell{background:#fff;color:var(--ink);border:1px solid #C9CED8;font-weight:500}
+.debatte .dcell:hover{border-color:var(--ink)}
+.debatte .dmapx{margin:4px 0 0;font-size:12.5px}
+.debatte .dfilter{display:flex;gap:10px;flex-wrap:wrap;justify-content:space-between;margin:0 0 4px}
+.debcard .ddstats .t-weniger b{color:#8A4200}.debcard .ddstats .t-praez b{color:#4A5263}.debcard .ddstats .t-mehr b{color:#1D4F8C}
+@media (max-width:760px){.debatte .dtiles.three{grid-template-columns:1fr 1fr 1fr}.debatte .dk-tile .sub{display:none}}

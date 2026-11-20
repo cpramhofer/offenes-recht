@@ -90,8 +90,8 @@ async function route(){
   if (p[0]==="debatte" && /^\d{8}$/.test(p[1]||"")){
     const fresh = S.page !== "debatte" || S.debGnr !== p[1];
     S.page = "debatte"; S.mode = "home"; S.gnr = null; S.law = null; if (S.panel==="anchor") S.panel = "default";
-    if (S.debGnr !== p[1]){ S.debGnr = p[1]; S.deb = null; S.debOpen = null; S.debTab = "streit"; }
-    S.debTab = ["streit","einig","weitere","legistik","matrix","karte","stellungnahmen"].includes(p[2]) ? p[2] : (fresh ? "streit" : S.debTab);
+    if (S.debGnr !== p[1]){ S.debGnr = p[1]; S.deb = null; S.debOpen = null; S.debTab = "stellen"; S.debStance = ""; S.debSort = "text"; }
+    S.debTab = ["stellen","matrix","karte","stellungnahmen"].includes(p[2]) ? p[2] : (fresh ? "stellen" : S.debTab);
     if (S.debTab==="karte" && (!S.wk || S.wk.gnr!==p[1])){ S.wk = null; S.wkSel = null;
       api("/api/conflicts?gnr="+p[1]).then(j => { S.wk = j; wkLayout(S.wk); if (S.page==="debatte") renderPage(); }).catch(e => { S.wk = {error:e.message, gnr:p[1]}; if (S.page==="debatte") renderPage(); }); }
     if (S.debTab==="stellungnahmen" && (!S.debSn || S.debSn.gnr!==p[1])) api("/api/statements?gnr="+p[1]).then(j => { S.debSn = j; if (S.page==="debatte") renderPage(); }).catch(()=>{});
@@ -366,7 +366,7 @@ function renderHome(){
 function renderHub(){
   const st = S.cat.stats || {}, dr = S.drafts || [], act = dr.filter(d => d.active).length, done = dr.length - act;
   const props = (S.all||[]).filter(c => c.type==="prop" && !c.removed && !/^9/.test(c.key)).length;
-  const deb = S.debates || [], contested = deb.reduce((n,d) => n + d.contested, 0), voices = new Set();
+  const deb = S.debates || [], positions = deb.reduce((n,d) => n + d.arguments, 0);
   $("law").innerHTML = `<div class="hub">
     <section class="hubhead">
       <div class="lbl">Offenes Recht</div>
@@ -384,7 +384,7 @@ function renderHub(){
       <a class="hubtile" href="#/begutachtung">
         <span class="lbl">Bereich</span><h2>Begutachtung</h2>
         <p>Gesetzesentwürfe der Ministerien vor dem Beschluss: wer welche Stellungnahme abgegeben hat, wo gestritten wird und wo Einigkeit herrscht.</p>
-        <div class="hstats"><span><b>${act}</b> in Begutachtung</span><span><b>${done}</b> abgeschlossen, noch nicht in Kraft</span><span><b>${contested}</b> Streitpunkte</span></div>
+        <div class="hstats"><span><b>${act}</b> in Begutachtung</span><span><b>${done}</b> abgeschlossen, noch nicht in Kraft</span><span><b>${nf(positions)}</b> Argumente aus Stellungnahmen</span></div>
         <span class="go">Zur Begutachtung</span></a>
     </div>
     <section class="hubabout">
@@ -430,8 +430,8 @@ function renderBegutachtung(){
       <div class="pgrid">${ds.map(d => `<article class="pcard drcard debcard">
         <div class="chead"><span class="pill pkg">${esc(d.nr)}</span><span class="vfy">${esc(d.ressort||"")}</span>${d.active ? `<span class="pill s-diskutiert">in Begutachtung</span>` : stagePill(d)}</div>
         <a class="paddr" href="#/debatte/${d.gnr}">${esc(d.title)}</a>
-        <div class="ddstats"><span class="${d.contested?"hot":""}"><b>${d.contested}</b> ${d.contested===1?"Streitpunkt":"Streitpunkte"}</span><span><b>${d.agreed}</b> einig</span><span><b>${d.voices}</b> ${d.voices===1?"Stellungnehmer":"Stellungnehmer"}</span></div>
-        ${d.top.length ? `<ul class="ddtop">${d.top.map(g => `<li><a href="#/debatte/${d.gnr}" data-debfocus="${g.id}">${esc(g.title)}</a>${debBar(g.counts)}</li>`).join("")}</ul>` : `<div class="why">${d.without_stance ? "Noch keine Streitpunkte: Die Beiträge sind noch nicht nach Richtung eingeordnet." : "Keine Streitpunkte."}</div>`}
+        <div class="ddstats"><span class="t-weniger"><b>${(d.by_stance||{}).weniger||0}</b> zurücknehmen</span><span class="t-praez"><b>${(d.by_stance||{}).praez||0}</b> präzisieren</span><span class="t-mehr"><b>${(d.by_stance||{}).mehr||0}</b> ausweiten</span><span><b>${d.voices}</b> Stellungnehmer</span></div>
+        ${d.top.length ? `<div class="why">Meiste Stellungnehmer:</div><ul class="ddtop">${d.top.map(g => `<li><a href="#/debatte/${d.gnr}" data-debfocus="${g.id}">${esc(g.title)}</a>${debBar(g.counts)}</li>`).join("")}</ul>` : `<div class="why">${d.without_stance ? "Die Beiträge sind noch nicht nach Richtung eingeordnet." : ""}</div>`}
         <div class="row"><a class="btn" href="#/debatte/${d.gnr}">Debatte ansehen</a><a class="btn ghost" href="#/debatte/${d.gnr}/stellungnahmen">Stellungnahmen${d.statements!=null?` (${d.statements})`:""}</a></div>
       </article>`).join("")}</div>` : `<div class="empty">Noch keine Debatten.</div>`;
   } else {
@@ -504,9 +504,9 @@ function wkBody(m){
       ${(selEdge.notes||[]).length ? `<h4>Worin</h4><ul class="wklist">${selEdge.notes.map(t => `<li>${esc(t)}</li>`).join("")}</ul>` : ""}
       <button class="linkbtn" data-wclear>Auswahl aufheben</button>`;
   }
-  const axis = m.issues.filter(g => g.kind==="strittig" || g.kind==="einig").map(g => {
+  const axis = m.issues.map(g => {
     const col = {weniger:[], praez:[], mehr:[], "±":[], "":[]}; g.positions.forEach(p => col[p.stance].push(p.name));
-    return `<div class="wkax"><div class="wkax-t"><b>${esc(g.title)}</b> <span class="pill dk-${g.kind}">${g.kind}</span></div>
+    return `<div class="wkax"><div class="wkax-t"><b>${esc(g.title)}</b> <span class="why">${g.organizations} Stellungnehmer</span></div>
       <div class="wkax-row"><div class="z z-weniger">${col.weniger.concat(col["±"]).map(x => `<span>${esc(x)}</span>`).join("") || "–"}</div>
         <div class="z z-praez">${col.praez.concat(col[""]).map(x => `<span>${esc(x)}</span>`).join("") || "–"}</div>
         <div class="z z-mehr">${col.mehr.concat(col["±"]).map(x => `<span>${esc(x)}</span>`).join("") || "–"}</div></div></div>`; }).join("");
@@ -1199,13 +1199,19 @@ function renderStatistik(){
 async function loadDebate(){
   try { S.deb = await api("/api/debate?gnr="+S.debGnr); }
   catch(e){ S.deb = {error:e.message}; }
-  if (S.deb && S.deb.issues && !S.debOpen){ const f = S.deb.issues.find(g => g.kind==="strittig"); S.debOpen = new Set(f ? [f.id] : []); }
+  if (S.deb && S.deb.issues && !S.debOpen) S.debOpen = new Set();
 }
-const DEB_KINDS = {strittig:"strittig", einig:"einig", mehrere:"mehrere Positionen", anregung:"einzelne Anregung", legistik:"nur legistisch"};
-const DEB_TAB_OF = {strittig:"streit", einig:"einig", mehrere:"weitere", anregung:"weitere", legistik:"legistik"};
+// Richtung je Stelle: Schattierung aus den Anteilen von Zurücknehmen, Präzisieren, Ausweiten (und ohne Richtung)
+const ST_TINT = {weniger:"#F0C49A", praez:"#D3D8E0", mehr:"#B5CDEB", "":"#EEF0F3"};
+function stanceShade(c){
+  const t = ["weniger","praez","mehr",""].reduce((n,k) => n + (c[k]||0), 0) || 1; let acc = 0;
+  const stops = ["weniger","praez","mehr",""].filter(k => c[k]).map(k => { const a = acc; acc += c[k]*100/t; return `${ST_TINT[k]} ${a.toFixed(1)}% ${acc.toFixed(1)}%`; });
+  return stops.length ? `background:linear-gradient(90deg,${stops.join(",")})` : "";
+}
+function stanceTitle(c){ return [["weniger","zurücknehmen"],["praez","präzisieren"],["mehr","ausweiten"],["","ohne Richtung"]].filter(([k]) => c[k]).map(([k,l]) => `${c[k]} ${l}`).join(", "); }
 function debGo(id){
   const g = (S.deb && S.deb.issues || []).find(x => x.id===id); if (!g) return;
-  S.debTab = DEB_TAB_OF[g.kind]; S.debOpen = S.debOpen || new Set(); S.debOpen.add(id); renderPage();
+  S.debTab = "stellen"; S.debStance = ""; S.debOpen = S.debOpen || new Set(); S.debOpen.add(id); renderPage();
   const el = document.getElementById("deb-"+id); if (el) el.scrollIntoView({behavior:"smooth", block:"start"});
 }
 const orgsTxt = a => a.organizations.join(", ");
@@ -1230,9 +1236,9 @@ function debIssue(g, st){
   const open = S.debOpen && S.debOpen.has(g.id), c = g.counts, tot = g.arguments.length || 1;
   const pct = n => Math.round(n*100/tot)+"%";
   const cols = ["weniger","praez","mehr"].concat(c[""] ? [""] : []);
-  return `<article class="dissue k-${g.kind}" id="deb-${g.id}">
+  return `<article class="dissue" id="deb-${g.id}">
     <button class="dhead" data-debtoggle="${g.id}" aria-expanded="${open}">
-      <span class="dmeta"><span class="pill dk-${g.kind}">${DEB_KINDS[g.kind]}</span>${(() => { const L = [...new Set(g.places.map(p => p.label))]; return `<span class="dplace">${esc(L.slice(0,3).join(" · "))}${L.length>3?` · +${L.length-3}`:""}</span>`; })()}
+      <span class="dmeta">${(() => { const L = [...new Set(g.places.map(p => p.label))]; return `<span class="dplace">${esc(L.slice(0,3).join(" · "))}${L.length>3?` · +${L.length-3}`:""}</span>`; })()}
         <span class="why dcount">${g.arguments.length} ${g.arguments.length===1?"Argument":"Argumente"} von ${g.organizations} ${g.organizations===1?"Stimme":"Stimmen"}</span><span class="dchev" aria-hidden="true">${open?"−":"+"}</span></span>
       <span class="dtitle">${esc(g.title)}</span>
       ${g.question?`<span class="why">${esc(g.question)}</span>`:""}
@@ -1253,18 +1259,19 @@ function renderDebatte(){
   const d = S.deb;
   if (!d) return `<article class="legal doc debatte"><div class="lbl">Debatte</div><h1>Debatte</h1><div class="empty">Lade …</div></article>`;
   if (d.error) return `<article class="legal doc"><h1>Debatte</h1><p>${esc(d.error)}</p></article>`;
-  const sm = d.summary, st = d.stances, tab = S.debTab || "streit";
-  const by = k => d.issues.filter(g => g.kind===k);
-  const weitere = d.issues.filter(g => g.kind==="mehrere" || g.kind==="anregung");
-  const left = daysLeft(d.deadline);
-  const TABS = [["streit",`Strittig (${sm.contested})`],["einig",`Einigkeit (${sm.agreed})`],["weitere",`Weitere Anregungen (${weitere.length})`],["legistik",`Legistisches (${sm.legistic})`],["matrix","Wer steht wo"]].concat(d.draft ? [["karte","Widerspruchskarte"],["stellungnahmen",`Stellungnahmen${d.statements!=null?` (${d.statements})`:""}`]] : []);
-  const tiles = [["streit",sm.contested,"Streitpunkte","Positionen widersprechen einander","strittig"],["einig",sm.agreed,"Einigkeit","Gleiche Richtung, keine Gegenstimme","einig"],
-                 ["matrix",sm.organizations,"Stellungnehmer","Organisationen, Behörden, Personen","stimmen"],["legistik",sm.legistic,"Legistisch","Formale Korrekturen","legistik"]];
+  const sm = d.summary, st = d.stances, tab = S.debTab || "stellen", bs = sm.by_stance || {};
+  const left = daysLeft(d.deadline), fs = S.debStance || "";
+  const TABS = [["stellen",`Stellen (${sm.places})`],["matrix","Wer steht wo"]].concat(d.draft ? [["karte","Widerspruchskarte"],["stellungnahmen",`Stellungnahmen${d.statements!=null?` (${d.statements})`:""}`]] : []);
+  const tiles = [["weniger",bs.weniger||0,st.weniger.label,st.weniger.hint],["praez",bs.praez||0,st.praez.label,st.praez.hint],["mehr",bs.mehr||0,st.mehr.label,st.mehr.hint]];
   let body = "";
-  if (tab==="streit") body = `<p class="why dexpl">Jede Position wird am Text gemessen: <b class="t-weniger">${esc(st.weniger.label)}</b> (${esc(st.weniger.hint.toLowerCase())}), <b class="t-praez">${esc(st.praez.label)}</b> (${esc(st.praez.hint.toLowerCase())}) oder <b class="t-mehr">${esc(st.mehr.label)}</b> (${esc(st.mehr.hint.toLowerCase())}). Gleichlautende Beiträge derselben Stimme sind zu einem Argument zusammengefasst.</p>
-      ${by("strittig").map(g => debIssue(g, st)).join("") || `<div class="empty">Noch keine Streitpunkte. Streit wird erkannt, wenn Beiträge eine Richtung angeben und einander widersprechen.</div>`}`;
-  else if (tab==="einig") body = by("einig").map(g => debIssue(g, st)).join("") || `<div class="empty">Noch keine Punkte, bei denen sich mehrere Stimmen in dieselbe Richtung einig sind.</div>`;
-  else if (tab==="weitere") body = weitere.map(g => debIssue(g, st)).join("") || `<div class="empty">Keine weiteren Anregungen.</div>`;
+  if (tab==="stellen"){
+    let list = d.issues.filter(g => !fs || g.counts[fs]);
+    if ((S.debSort||"text")==="stimmen") list = [...list].sort((a,b) => b.organizations - a.organizations);
+    body = `<p class="why dexpl">Jede Position wird am Text gemessen: <b class="t-weniger">${esc(st.weniger.label)}</b> (${esc(st.weniger.hint.toLowerCase())}), <b class="t-praez">${esc(st.praez.label)}</b> (${esc(st.praez.hint.toLowerCase())}) oder <b class="t-mehr">${esc(st.mehr.label)}</b> (${esc(st.mehr.hint.toLowerCase())}). Gleichlautende Beiträge desselben Stellungnehmers sind zu einem Argument zusammengefasst.</p>
+      <div class="dfilter"><div class="seg" role="group" aria-label="Richtung">${[["","Alle"],["weniger",st.weniger.label],["praez",st.praez.label],["mehr",st.mehr.label]].map(([k,l]) => `<button data-debst="${k}" aria-pressed="${fs===k}">${esc(l)}${k?` (${d.issues.filter(g => g.counts[k]).length})`:""}</button>`).join("")}</div>
+        <div class="seg" role="group" aria-label="Sortierung">${[["text","Reihenfolge im Text"],["stimmen","Meiste Stellungnehmer"]].map(([k,l]) => `<button data-debsort="${k}" aria-pressed="${(S.debSort||"text")===k}">${l}</button>`).join("")}</div></div>
+      ${list.map(g => debIssue(g, st)).join("") || `<div class="empty">Keine Stellen mit dieser Richtung.</div>`}`;
+  }
   else if (tab==="karte") body = wkBody(S.wk);
   else if (tab==="stellungnahmen"){
     const sn = S.debSn && S.debSn.gnr===d.gnr ? S.debSn : null, ST = {weniger:"zurücknehmen", praez:"präzisieren", mehr:"ausweiten"};
@@ -1276,25 +1283,25 @@ function renderDebatte(){
         <td>${x.contributions ? `${x.contributions} ${x.contributions===1?"Beitrag":"Beiträge"}${Object.keys(x.stances).length ? " · "+Object.entries(x.stances).map(([s_,n]) => `${n} ${ST[s_]}`).join(", ") : ""}<br><span class="why">erfasst von ${esc(x.captured_by.join(", "))}</span>` : `<span class="why">noch nicht erfasst</span>`}</td></tr>`).join("")}
       </tbody></table></div>`;
   }
-  else if (tab==="legistik") body = by("legistik").length ? `<ul class="dleg">${by("legistik").map(g => `<li><a class="dplace" href="#/g/${esc(g.places[0].key)}">${esc(g.places[0].label)}</a><span>${esc(g.arguments.map(a => a.summary).join(" · "))}</span><span class="why">${esc([...new Set(g.arguments.flatMap(a => a.organizations))].join(", "))}</span></li>`).join("")}</ul>` : `<div class="empty">Keine rein legistischen Korrekturen (Kategorie „Legistik“).</div>`;
   else {
     const m = d.matrix, SY = {"+":["t-mehr",st.mehr.label],"−":["t-weniger",st.weniger.label],"~":["t-praez",st.praez.label],"±":["",`${st.weniger.label} und ${st.mehr.label.toLowerCase()}`],"•":["","Richtung nicht angegeben"]};
-    body = m.columns.length ? `<div class="dmx-legend why"><span><b class="t-mehr">+</b> ${esc(st.mehr.label)}</span><span><b class="t-weniger">−</b> ${esc(st.weniger.label)}</span><span><b class="t-praez">~</b> ${esc(st.praez.label)}</span><span><b>±</b> beide Richtungen</span><span><b>•</b> ohne Richtung</span><span>leer: keine Äußerung</span></div>
-      <div class="tablewrap"><table class="dt dmx"><thead><tr><th scope="col">Stimme</th>${m.columns.map(c => `<th scope="col"><button class="linkbtn" data-debgo="${c.id}">${esc(c.title)}</button><span class="pill dk-${c.kind}">${DEB_KINDS[c.kind]}</span></th>`).join("")}</tr></thead>
+    body = m.columns.length ? `<p class="why">Die Stellen, zu denen sich die meisten Stellungnehmer geäußert haben.</p><div class="dmx-legend why"><span><b class="t-weniger">−</b> ${esc(st.weniger.label)}</span><span><b class="t-praez">~</b> ${esc(st.praez.label)}</span><span><b class="t-mehr">+</b> ${esc(st.mehr.label)}</span><span><b>±</b> beide Richtungen</span><span><b>•</b> ohne Richtung</span><span>leer: keine Äußerung</span></div>
+      <div class="tablewrap"><table class="dt dmx"><thead><tr><th scope="col">Stellungnehmer</th>${m.columns.map(c => `<th scope="col"><button class="linkbtn" data-debgo="${c.id}">${esc(c.title)}</button></th>`).join("")}</tr></thead>
       <tbody>${m.rows.filter(r => r.cells.some(Boolean)).map(r => `<tr><th scope="row">${r.url?`<a href="${esc(r.url)}" target="_blank" rel="noopener">${esc(r.organization)}</a>`:esc(r.organization)}${r.ref?`<span class="why"> ${esc(r.ref)}</span>`:""}</th>${r.cells.map((v,i) => `<td><span class="dsym ${v?(SY[v]||[""])[0]:""} ${v?"on":""}" title="${esc(r.organization)} · ${esc(m.columns[i].title)}: ${esc(v ? SY[v][1] : "keine Äußerung")}">${v}</span></td>`).join("")}</tr>`).join("")}</tbody></table></div>`
-      : `<div class="empty">Die Matrix entsteht, sobald es Streitpunkte oder Einigkeit gibt.</div>`;
+      : `<div class="empty">Die Matrix entsteht, sobald sich mindestens zwei Stellungnehmer zur selben Stelle geäußert haben.</div>`;
   }
   return `<article class="legal doc konto debatte">
     <div class="lbl">${d.draft ? `<a href="#/begutachtung/debatten">Begutachtung › Debatten</a> · ${esc(d.abbreviation||"")}${d.ministry?" · "+esc(d.ministry):""}` : "Debatte"}</div>
     <h1>${esc(d.title)}</h1>
     <div class="kmeta">${d.draft && left!==null ? `<span class="pill ${left<=3?"s-umstritten":"s-diskutiert"}">${left<0?"Begutachtung abgeschlossen":left===0?"Begutachtungsfrist endet heute":`Begutachtung noch ${left} ${left===1?"Tag":"Tage"}`}</span>` : ""}
-      ${d.statements!=null?`<span class="chip static">${d.statements} Stellungnahmen beim Parlament</span>`:""}<span class="chip static">${sm.contributions} Beiträge · ${sm.arguments} Argumente</span>
-<a class="linkbtn subtle" href="#/g/${d.gnr}">Zum ${d.draft?"Entwurfstext":"Text"}</a>${followBtn("law", d.gnr, "linkbtn subtle")}${shareBtn("/e/"+d.gnr)}</div>
-    <div class="hero dtiles">${tiles.map(([k,n,l,sub,cls]) => `<button data-debtab="${k}" class="dk-tile ${cls}"><b>${n}</b><span class="tl">${l}</span><span class="sub">${sub}</span></button>`).join("")}</div>
-    ${sm.without_stance ? `<p class="dnote why">${sm.without_stance} von ${sm.contributions} Beiträgen haben noch keine Richtung und zählen daher weder als Streit noch als Einigkeit. Verfasserinnen, Verfasser und Bots können sie nachträglich einordnen (API und MCP: <code>annotate_contribution</code>).</p>` : ""}
+      ${d.statements!=null?`<span class="chip static">${d.statements} Stellungnahmen beim Parlament</span>`:""}<span class="chip static">${sm.contributions} Beiträge · ${sm.arguments} Argumente · ${sm.organizations} Stellungnehmer</span>
+      <a class="linkbtn subtle" href="#/g/${d.gnr}">Zum ${d.draft?"Entwurfstext":"Text"}</a>${followBtn("law", d.gnr, "linkbtn subtle")}${shareBtn("/e/"+d.gnr)}</div>
+    <div class="hero dtiles three">${tiles.map(([k,n,l,sub]) => `<button data-debst="${k}" data-debtab="stellen" class="dk-tile st-${k}" aria-pressed="${tab==="stellen" && fs===k}"><b>${n}</b><span class="tl">${esc(l)}</span><span class="sub">${n===1?"Argument":"Argumente"}: ${esc(sub.toLowerCase())}</span></button>`).join("")}</div>
+    ${sm.without_stance ? `<p class="dnote why">${sm.without_stance} von ${sm.contributions} Beiträgen haben noch keine Richtung. Verfasserinnen, Verfasser und Bots können sie nachträglich einordnen (API und MCP: <code>annotate_contribution</code>).</p>` : ""}
     <section class="dmap" aria-labelledby="dmap-h"><div class="khead"><h2 id="dmap-h">Streitkarte</h2>
-      <span class="dmx-legend why">${["strittig","mehrere","einig","anregung","legistik"].map(k => `<span><i class="dsw dk-${k}"></i>${DEB_KINDS[k]}</span>`).join("")}</span></div>
-      ${d.map.map(r => `<div class="dmrow"><span class="why">${esc(r.label)}</span><div>${r.places.map(p => `<button class="dcell dk-${p.kind}" data-debgo="${p.group}" title="${esc(p.title)}: ${DEB_KINDS[p.kind]}">${esc(p.label)}</button>`).join("")}</div></div>`).join("") || `<div class="empty">Noch keine Beiträge.</div>`}
+      <span class="dmx-legend why">${[["weniger",st.weniger.label],["praez",st.praez.label],["mehr",st.mehr.label],["","ohne Richtung"]].map(([k,l]) => `<span><i class="dsw" style="background:${ST_TINT[k]}"></i>${esc(l)}</span>`).join("")}</span></div>
+      <p class="why dmapx">Jedes Feld ist eine Ziffer bzw. ein Paragraph. Die Schattierung zeigt, wie sich die Argumente dort auf die drei Richtungen verteilen.</p>
+      ${d.map.map(r => `<div class="dmrow"><span class="why">${esc(r.label)}</span><div>${r.places.map(p => `<button class="dcell" style="${stanceShade(p.counts)}" data-debgo="${p.group}" title="${esc(p.title)}: ${esc(stanceTitle(p.counts))}">${esc(p.label)}</button>`).join("")}</div></div>`).join("") || `<div class="empty">Noch keine Beiträge.</div>`}
     </section>
     <nav class="ktabs" aria-label="Bereiche der Debatte">${TABS.map(([k,l]) => `<a href="#/debatte/${d.gnr}/${k}" aria-current="${tab===k}">${l}</a>`).join("")}</nav>
     <div class="dlist">${body}</div>
@@ -1786,6 +1793,8 @@ document.addEventListener("click", async e => {
     try { const r = await api("/api/verify-resend", {}); toast(`Neuer Link an ${r.email} gesendet.`); } catch(err){ toast(err.message); }
     return;
   }
+  if (t && t.dataset.debst!==undefined){ const k = t.dataset.debst; S.debStance = (t.dataset.debtab && S.debStance===k && S.debTab==="stellen") ? "" : k; S.debTab = "stellen"; renderPage(); return; }
+  if (t && t.dataset.debsort){ S.debSort = t.dataset.debsort; renderPage(); return; }
   if (t && t.dataset.debtab){ S.debTab = t.dataset.debtab; renderPage(); return; }
   if (t && t.dataset.debgo){ debGo(t.dataset.debgo); return; }
   if (t && t.dataset.debtoggle){ const id = t.dataset.debtoggle; S.debOpen = S.debOpen || new Set(); S.debOpen.has(id) ? S.debOpen.delete(id) : S.debOpen.add(id); renderPage(); return; }
