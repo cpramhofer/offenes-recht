@@ -43,6 +43,8 @@ CREATE TABLE IF NOT EXISTS stakeholders(id INTEGER PRIMARY KEY, key TEXT UNIQUE 
 CREATE TABLE IF NOT EXISTS statements(nr TEXT PRIMARY KEY, gnr TEXT NOT NULL, stakeholder_id INTEGER, sender TEXT, unit TEXT, date TEXT,
   url TEXT, n INTEGER, seen INTEGER, public INTEGER DEFAULT 1);
 CREATE INDEX IF NOT EXISTS statements_gnr ON statements(gnr);
+CREATE TABLE IF NOT EXISTS data_version(id INTEGER PRIMARY KEY CHECK(id=1), v INTEGER NOT NULL);
+INSERT OR IGNORE INTO data_version VALUES(1, 0);
 CREATE TABLE IF NOT EXISTS email_tokens(token_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL, email TEXT, created INTEGER, expires INTEGER);
 CREATE TABLE IF NOT EXISTS arg_ratings(user_id INTEGER, cid INTEGER, v TEXT, created INTEGER, PRIMARY KEY(user_id, cid));
 CREATE TABLE IF NOT EXISTS contribution_links(a INTEGER NOT NULL, b INTEGER NOT NULL, kind TEXT NOT NULL, note TEXT, user_id INTEGER, created INTEGER,
@@ -74,6 +76,19 @@ CREATE TABLE IF NOT EXISTS resets(token_hash TEXT PRIMARY KEY, user_id INTEGER N
 """
 
 # ---------- Hilfsfunktionen ----------
+# ---------- Speicher: weniger glibc-Arenen, freigegebenen Speicher ans System zurückgeben, gleichzeitige Arbeit begrenzen ----------
+try:
+    import ctypes
+    _libc = ctypes.CDLL("libc.so.6"); _libc.mallopt(-8, 2)          # M_ARENA_MAX = 2: Threads teilen sich Speicherbereiche
+except Exception: _libc = None
+_trim_last = [0.0]
+def trim_memory(force=False):
+    if _libc and (force or time.time() - _trim_last[0] > 5):
+        _trim_last[0] = time.time()
+        try: _libc.malloc_trim(0)
+        except Exception: pass
+WORK_SLOTS = threading.BoundedSemaphore(int(os.environ.get("OR_WORKERS", "6")))
+
 def db():
     c = getattr(_local, "db", None)
     if c is None:
@@ -162,6 +177,10 @@ def init_db(seed=True):
         for r in c.execute("SELECT id, why, src_ref FROM contributions WHERE key LIKE '9%'").fetchall():
             refs = [r["src_ref"]] if r["src_ref"] and SN_RE.fullmatch(r["src_ref"]) else SN_RE.findall(r["why"] or "")
             if refs: c.execute("UPDATE contributions SET sn_nr=? WHERE id=?", (", ".join(dict.fromkeys(refs)), r["id"]))
+    # Jede Änderung an Beiträgen, Bewertungen, Verknüpfungen, Stellungnahmen oder Konten erhöht den Datenstand (für Zwischenspeicher)
+    for t in ("contributions", "ratings", "pairwise", "arg_ratings", "contribution_links", "statements", "stakeholders", "users"):
+        for ev in ("INSERT", "UPDATE", "DELETE"):
+            c.execute(f"CREATE TRIGGER IF NOT EXISTS dv_{t}_{ev.lower()} AFTER {ev} ON {t} BEGIN UPDATE data_version SET v=v+1 WHERE id=1; END")
     dcols = [r[1] for r in c.execute("PRAGMA table_info(drafts)")]
     if "sn_checked" not in dcols: c.execute("ALTER TABLE drafts ADD COLUMN sn_checked INTEGER")
     if "stage" not in dcols:                                             # Stand des Gesetzgebungsverfahrens nach der Begutachtung
@@ -967,7 +986,7 @@ class Handler(BaseHTTPRequestHandler):
 
     # --- Antworten
     def send_json(self, code, obj, extra_headers=()):
-        body = json.dumps(obj, ensure_ascii=False).encode()
+        body = obj if isinstance(obj, (bytes, bytearray)) else json.dumps(obj, ensure_ascii=False).encode()
         self.send_response(code)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Cache-Control", "no-store")
@@ -1033,6 +1052,13 @@ class Handler(BaseHTTPRequestHandler):
     def do_DELETE(self): self.dispatch("DELETE")
 
     def dispatch(self, method):
+        if not WORK_SLOTS.acquire(timeout=30):                     # Überlast: lieber kurz abweisen als den Speicher sprengen
+            self.send_json(503, {"error": "Der Server ist gerade ausgelastet. Bitte gleich noch einmal versuchen."}, (("Retry-After", "5"),)); return
+        try: self._dispatch(method)
+        finally:
+            WORK_SLOTS.release(); trim_memory()
+
+    def _dispatch(self, method):
         u = urlparse(self.path); path = u.path
         from urllib.parse import parse_qs
         self.query = {k: v[0] for k, v in parse_qs(u.query).items()}
@@ -1200,19 +1226,37 @@ def r_ack_key(h):
     db().execute("UPDATE users SET api_key_once=NULL WHERE id=?", (u["id"],)); db().commit()
     return {"ok": True}
 
+def data_version(c=None):
+    return (c or db()).execute("SELECT v FROM data_version WHERE id=1").fetchone()[0]
+
+_state_cache = {}; _state_lock = threading.Lock()
+def contributions_json(c, gnr):
+    """Serialisierte Beitragsliste, je Datenstand einmal berechnet und von allen Anfragen geteilt (spart Speicher und Rechenzeit)."""
+    k = (gnr or "*", data_version(c))
+    hit = _state_cache.get(k)
+    if hit is not None: return hit
+    with _state_lock:
+        hit = _state_cache.get(k)
+        if hit is not None: return hit
+        if gnr: rows = c.execute("SELECT * FROM contributions WHERE key LIKE ? ORDER BY id", (gnr + "/%",)).fetchall()
+        else: rows = c.execute("SELECT * FROM contributions ORDER BY id").fetchall()
+        data = json.dumps(serialize(rows, contribution_stats(c, rows), all_users(c)), ensure_ascii=False).encode()
+        del rows
+        for old in [x for x in _state_cache if x[1] != k[1] or len(_state_cache) > 40]: _state_cache.pop(old, None)
+        _state_cache[k] = data
+    trim_memory()
+    return data
+
 def r_state(h):
     c = db(); u = h.session_user()
     gnr = h.query.get("gnr", "")
-    if re.fullmatch(r"\d{8}", gnr):
-        rows = c.execute("SELECT * FROM contributions WHERE key LIKE ? ORDER BY id", (gnr + "/%",)).fetchall()
-    else:
-        rows = c.execute("SELECT * FROM contributions ORDER BY id").fetchall()
-    res = {"contributions": serialize(rows, contribution_stats(c, rows), all_users(c)),
-           "user": me_view(u) if u else None, "myRatings": {}, "myPairs": []}
+    gnr = gnr if re.fullmatch(r"\d{8}", gnr) else ""
+    rest = {"user": me_view(u) if u else None, "myRatings": {}, "myPairs": []}
     if u:
-        res["myRatings"] = {str(r["cid"]): r["v"] for r in c.execute("SELECT cid,v FROM ratings WHERE user_id=?", (u["id"],))}
-        res["myPairs"] = [[r["a"], r["b"]] for r in c.execute("SELECT a,b FROM pairwise WHERE user_id=?", (u["id"],))]
-    return res
+        rest["myRatings"] = {str(r["cid"]): r["v"] for r in c.execute("SELECT cid,v FROM ratings WHERE user_id=?", (u["id"],))}
+        rest["myPairs"] = [[r["a"], r["b"]] for r in c.execute("SELECT a,b FROM pairwise WHERE user_id=?", (u["id"],))]
+    tail = json.dumps(rest, ensure_ascii=False).encode()
+    return b'{"contributions":' + contributions_json(c, gnr) + b"," + tail[1:]
 
 def create_contribution(u, d, via):
     need(u["status"] == "active", 403, "Ihr Konto ist noch nicht freigeschaltet." if u["role"] == "bot" else "Konto nicht aktiv.")
@@ -1668,7 +1712,7 @@ def r_norm(h):
 # mit API-Schlüssel (Authorization: Bearer …). REST und MCP verwenden dieselben Kernfunktionen.
 from urllib.parse import unquote
 
-APP_VERSION = "2.3"
+APP_VERSION = "2.3.1"
 READ_LIMIT_PER_MIN = int(os.environ.get("OR_API_READ_LIMIT", "120"))
 WRITE_LIMIT_PER_HOUR = int(os.environ.get("OR_API_WRITE_HOUR", "20"))
 WRITE_LIMIT_PER_DAY = int(os.environ.get("OR_API_WRITE_DAY", "100"))
@@ -2125,8 +2169,25 @@ def draft_toc(units, erl=False, hints=None):
             toc.append({"a": u["a"], "level": 2, "label": lab}); last2 = lab
     return toc
 
+_debate_cache = {}
 def debate(gnr, user=None, public=False):
-    c = db(); need(re.fullmatch(r"\d{8}", gnr or ""), 400, "gnr: Gesetzesnummer mit 8 Ziffern.")
+    """Zwischengespeichert je Datenstand; mit angemeldetem Konto kommen nur dessen eigene Einschätzungen dazu."""
+    need(re.fullmatch(r"\d{8}", gnr or ""), 400, "gnr: Gesetzesnummer mit 8 Ziffern.")
+    k = (gnr, data_version())
+    res = _debate_cache.get(k)
+    if res is None:
+        res = _debate_compute(gnr)
+        for old in [x for x in _debate_cache if x[1] != k[1] or len(_debate_cache) > 60]: _debate_cache.pop(old, None)
+        _debate_cache[k] = res
+    if public: return res
+    mine = {x["cid"]: x["v"] for x in db().execute("SELECT cid, v FROM arg_ratings WHERE user_id=?", (user["id"],))} if user else {}
+    out = json.loads(json.dumps(res))                         # Kopie, damit der geteilte Zwischenspeicher unverändert bleibt
+    for g in out["issues"]:
+        for a in g["arguments"]: a["mine"] = next((mine[i] for i in a["contributions"] if i in mine), None)
+    return out
+
+def _debate_compute(gnr, user=None, public=True):
+    c = db()
     law = c.execute("SELECT gnr, kurztitel, abk, tgroup FROM laws WHERE gnr=?", (gnr,)).fetchone()
     need(law, 404, "Diese Rechtsvorschrift gibt es nicht.")
     rows = c.execute("SELECT * FROM contributions WHERE key LIKE ? AND removed_at IS NULL ORDER BY id", (gnr + "/%",)).fetchall()
@@ -3473,6 +3534,7 @@ def scheduler():
     """Hintergrund: Begutachtungsentwürfe alle 6 Stunden, Zusammenfassungen täglich ab 7 Uhr."""
     time.sleep(20)
     while True:
+        trim_memory(force=True)
         try:
             c = db()
             last = c.execute("SELECT v FROM meta WHERE k='drafts_synced'").fetchone()
