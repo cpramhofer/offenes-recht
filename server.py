@@ -1712,7 +1712,7 @@ def r_norm(h):
 # mit API-Schlüssel (Authorization: Bearer …). REST und MCP verwenden dieselben Kernfunktionen.
 from urllib.parse import unquote
 
-APP_VERSION = "2.3.1"
+APP_VERSION = "2.3.2"
 READ_LIMIT_PER_MIN = int(os.environ.get("OR_API_READ_LIMIT", "120"))
 WRITE_LIMIT_PER_HOUR = int(os.environ.get("OR_API_WRITE_HOUR", "20"))
 WRITE_LIMIT_PER_DAY = int(os.environ.get("OR_API_WRITE_DAY", "100"))
@@ -3292,12 +3292,18 @@ def stakeholder_view(sid, user=None):
     if user and user["id"] == k["claimed_by"]: res["my_claim"] = k["claim_status"]
     return res
 
-_deb_cache = {}
+_deb_cache = {}; _deb_lock = threading.Lock()
 def debates_list():
-    """Alle Entwürfe mit Beiträgen und Kurzfassung ihrer Debatte (zwei Minuten zwischengespeichert)."""
+    """Alle Entwürfe mit Beiträgen und Kurzfassung ihrer Debatte. Wird im Hintergrund vorberechnet (debates_warmer);
+    Anfragen bekommen immer sofort den letzten Stand, nur ganz ohne Vorberechnung wird hier gerechnet."""
     hit = _deb_cache.get("all")
-    if hit and hit[0] > time.time() - 120: return hit[1]
-    c = db(); out = []
+    if hit: return hit[2]
+    with _deb_lock:
+        hit = _deb_cache.get("all")
+        return hit[2] if hit else _debates_compute()
+
+def _debates_compute():
+    c = db(); v = data_version(c); out = []
     for d in list_drafts(True)["drafts"]:
         if not d.get("contributions"): continue
         try: x = debate(d["gnr"], public=True)
@@ -3310,7 +3316,21 @@ def debates_list():
                     "top": [{"id": g["id"], "title": g["title"], "organizations": g["organizations"], "counts": g["counts"]}
                             for g in sorted(x["issues"], key=lambda g: -g["organizations"]) if g["organizations"] >= 2][:3]})
     out.sort(key=lambda d: (-d["voices"], -d["arguments"], d["deadline"] or ""))
-    res = {"debates": out}; _deb_cache["all"] = (time.time(), res); return res
+    res = {"debates": out}; _deb_cache["all"] = (time.time(), v, res); return res
+
+def debates_warmer():
+    """Hintergrund: Debattenliste (und damit jede Debatte) nach dem Start und nach jeder Datenänderung vorberechnen."""
+    time.sleep(2)
+    while True:
+        try:
+            hit = _deb_cache.get("all")
+            if not hit or hit[1] != data_version() or hit[0] < time.time() - 3600:
+                t = time.time()
+                with _deb_lock: _debates_compute()
+                sys.stderr.write("Debatten vorberechnet in %.1f s\n" % (time.time() - t)); trim_memory(force=True)
+        except Exception as e:
+            sys.stderr.write("Vorberechnung Debatten: %r\n" % (e,))
+        time.sleep(30)
 
 def r_debates(h): return debates_list()
 def r_statements(h): return statements_of(h.query.get("gnr", ""))
@@ -4182,6 +4202,7 @@ def main():
     init_db()
     if a.cmd == "serve":
         print(f"Offenes Recht läuft auf http://{a.host}:{a.port}  (DB {DB_PATH})", flush=True)
+        threading.Thread(target=debates_warmer, daemon=True).start()
         if os.environ.get("OR_NO_RIS") != "1":
             threading.Thread(target=ris_background, daemon=True).start()
             threading.Thread(target=scheduler, daemon=True).start()
